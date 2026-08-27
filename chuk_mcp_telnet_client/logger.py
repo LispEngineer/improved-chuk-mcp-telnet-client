@@ -77,7 +77,7 @@ class TelnetSessionLogger:
     def log_command(
         self, session_id: str, host: str, port: int, command: str, response: str
     ) -> Optional[str]:
-        """Log a command and its response."""
+        """Log a command and its initial response."""
         log_path = self.get_session_log_path(session_id, host, port)
         if not log_path:
             return None
@@ -94,6 +94,49 @@ class TelnetSessionLogger:
             return log_path
         except Exception as e:
             logger.warning(f"Failed writing to telnet log file '{log_path}': {e}")
+            return None
+
+    def log_stream_chunk(
+        self, session_id: str, host: str, port: int, chunk: str
+    ) -> Optional[str]:
+        """Log a stream chunk received asynchronously in background."""
+        log_path = self.get_session_log_path(session_id, host, port)
+        if not log_path or not chunk:
+            return None
+
+        now_str = datetime.now().astimezone().isoformat()
+        entry = (
+            f"[{now_str}] [STREAM DATA]\n"
+            f"{chunk}\n"
+            f"{'-'*40}\n"
+        )
+        try:
+            with open(log_path, "a", encoding="utf-8", errors="replace") as f:
+                f.write(entry)
+            return log_path
+        except Exception as e:
+            logger.warning(f"Failed writing stream chunk to log '{log_path}': {e}")
+            return None
+
+    def log_input(
+        self, session_id: str, host: str, port: int, input_text: str
+    ) -> Optional[str]:
+        """Log interactive input sent to session."""
+        log_path = self.get_session_log_path(session_id, host, port)
+        if not log_path:
+            return None
+
+        now_str = datetime.now().astimezone().isoformat()
+        entry = (
+            f"[{now_str}] >>> [INPUT] {input_text}\n"
+            f"{'-'*40}\n"
+        )
+        try:
+            with open(log_path, "a", encoding="utf-8", errors="replace") as f:
+                f.write(entry)
+            return log_path
+        except Exception as e:
+            logger.warning(f"Failed writing input to log '{log_path}': {e}")
             return None
 
     def log_session_end(

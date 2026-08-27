@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "chuk-mcp-telnet-client"
-version = "0.3.2"
-description = "MCP Telnet Client with Persistent Session Disk Logging"
+version = "0.4.0"
+description = "MCP Telnet Client with Background Stream Buffering, Non-Blocking Polling, and Disk Logging"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

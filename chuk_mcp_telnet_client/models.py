@@ -21,4 +21,29 @@ class TelnetClientOutput(BaseModel):
     responses: List[CommandResponse]
     session_id: str
     session_active: bool
+    command_completed: bool = True
+    prompt_matched: Optional[str] = None
+    log_file: Optional[str] = None
+
+
+class TelnetReadSessionOutput(BaseModel):
+    session_id: str
+    host: str
+    port: int
+    output: str
+    new_bytes_count: int
+    total_bytes_received: int
+    command_completed: bool
+    prompt_matched: Optional[str] = None
+    session_active: bool
+    log_file: Optional[str] = None
+
+
+class TelnetSendInputOutput(BaseModel):
+    session_id: str
+    input_sent: str
+    response: str
+    command_completed: bool
+    prompt_matched: Optional[str] = None
+    session_active: bool
     log_file: Optional[str] = None
