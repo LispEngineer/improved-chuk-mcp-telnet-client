@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "chuk-mcp-telnet-client"
+version = "0.3.2"
+description = "MCP Telnet Client with Persistent Session Disk Logging"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "Chuk MCP Team" },
+    { name = "Douglas P. Fields, Jr.", email = "symbolics@lisp.engineer" }
+]
+dependencies = [
+    "chuk-mcp-server>=0.15.1",
+    "pydantic>=2.11.2",
+    "pyyaml>=6.0.2",
+    "telnetlib3>=2.0.4",
+]
+
+[project.scripts]
+chuk-mcp-telnet-client = "chuk_mcp_telnet_client.main:main"
+mcp-telnet-client = "chuk_mcp_telnet_client.main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["chuk_mcp_telnet_client"]
