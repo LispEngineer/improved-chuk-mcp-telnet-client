@@ -17,10 +17,14 @@ class TelnetSessionLogger:
     def __init__(self, log_dir: Optional[str] = None):
         if not log_dir:
             log_dir = os.environ.get("TELNET_LOG_DIR")
-        
-        # Default fallback to ~/.mcp-telnet-logs if nothing specified
+
+        # Smart fallback: if in a workspace with a logs/ folder, use that; otherwise ~/.mcp-telnet-logs
         if not log_dir:
-            log_dir = os.path.expanduser("~/.mcp-telnet-logs")
+            cwd_logs = os.path.join(os.getcwd(), "logs")
+            if os.path.isdir(cwd_logs):
+                log_dir = cwd_logs
+            else:
+                log_dir = os.path.expanduser("~/.mcp-telnet-logs")
         else:
             log_dir = os.path.expanduser(log_dir)
 
