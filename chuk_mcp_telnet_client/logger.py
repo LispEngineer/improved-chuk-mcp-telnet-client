@@ -93,8 +93,9 @@ class SessionLogger:
         header = (
             f"{'='*80}\n"
             f"{protocol.upper()} SESSION LOG: {target}\n"
-            f"Session ID : {session_id}\n"
-            f"Started At : {now_str}\n"
+            f"Server Version : chuk-mcp-terminal-client v0.5.0\n"
+            f"Session ID     : {session_id}\n"
+            f"Started At     : {now_str}\n"
             f"{'='*80}\n\n"
         )
         try:
