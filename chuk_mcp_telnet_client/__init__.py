@@ -1,6 +1,6 @@
 """Terminal (Telnet & Serial) Client MCP Server package."""
 
-__version__ = "0.5.0"
+__version__ = "0.5.1"
 
 from chuk_mcp_telnet_client.tools import (
     telnet_client_tool as telnet_client_tool,

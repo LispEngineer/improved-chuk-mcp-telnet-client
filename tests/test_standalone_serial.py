@@ -386,39 +386,81 @@ def test_list_sessions_polymorphic(temp_log_dir):
     asyncio.run(_test())
 
 
-def test_serial_no_overwrite_log(temp_log_dir):
-    """Test that reconnecting with an existing serial session ID increments filename and does not overwrite."""
+def test_serial_single_log_file_per_session(temp_log_dir):
+    """Test that a single persistent log file is created and maintained per serial session across multiple operations and reconnects."""
     async def _test():
         vax = MockVaxSerialDevice()
-        session_id = "no_overwrite_ser"
+        session_id = "test_ser_single_session"
         try:
             await serial_close_session(session_id)
 
-            # Session 1
+            # 1. Initial connection and commands
             res1 = await serial_client_tool(
                 port=vax.port,
                 commands=["SYSTEM", "sysvax60"],
                 serial_session_id=session_id,
                 log_dir=temp_log_dir,
-                close_session=True,
+                max_wait_seconds=5.0,
             )
-            log_file1 = res1.log_file
+            assert res1.log_file == os.path.join(temp_log_dir, f"{session_id}.log")
 
-            # Session 2
+            # 2. Subsequent command on existing active serial session
             res2 = await serial_client_tool(
+                port=vax.port,
+                commands=["SHOW TIME"],
+                serial_session_id=session_id,
+                log_dir=temp_log_dir,
+                max_wait_seconds=5.0,
+            )
+            assert res2.log_file == os.path.join(temp_log_dir, f"{session_id}.log")
+
+            # 3. Interactive input on existing active serial session
+            res3 = await serial_send_input(
+                session_id=session_id,
+                input_text="YES",
+                max_wait_seconds=2.0,
+            )
+            assert res3.log_file == os.path.join(temp_log_dir, f"{session_id}.log")
+
+            # 4. Polling read on active serial session
+            res4 = await serial_read_session(
+                session_id=session_id,
+                max_wait_seconds=1.0,
+            )
+            assert res4.log_file == os.path.join(temp_log_dir, f"{session_id}.log")
+
+            # 5. Close session
+            await serial_close_session(session_id)
+
+            # Verify that EXACTLY 1 log file exists in directory and no suffix files were created
+            log_files = sorted(os.listdir(temp_log_dir))
+            assert log_files == [f"{session_id}.log"], f"Expected only {[f'{session_id}.log']}, got {log_files}"
+            assert not any("_1.log" in f for f in log_files)
+
+            # Verify log content includes all sequential operations
+            log_path = os.path.join(temp_log_dir, f"{session_id}.log")
+            with open(log_path, "r") as f:
+                content = f.read()
+            assert "SERIAL SESSION LOG" in content
+            assert "SHOW TIME" in content
+            assert "YES" in content
+            assert "SESSION ENDED (Closed)" in content
+
+            # 6. Reconnect with same session ID: should append to existing file, NOT create _1.log
+            res_reconnect = await serial_client_tool(
                 port=vax.port,
                 commands=["SYSTEM", "sysvax60"],
                 serial_session_id=session_id,
                 log_dir=temp_log_dir,
                 close_session=True,
             )
-            log_file2 = res2.log_file
+            assert res_reconnect.log_file == log_path
 
-            assert log_file1 != log_file2
-            assert os.path.exists(log_file1)
-            assert os.path.exists(log_file2)
-            assert log_file2.endswith("_1.log")
+            # Verify STILL exactly one file exists on disk
+            log_files_after = sorted(os.listdir(temp_log_dir))
+            assert log_files_after == [f"{session_id}.log"], f"Expected only {[f'{session_id}.log']}, got {log_files_after}"
         finally:
             vax.stop()
 
     asyncio.run(_test())
+

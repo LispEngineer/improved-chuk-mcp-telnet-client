@@ -20,7 +20,7 @@ class CommandResponse(BaseModel):
 
 
 class TelnetClientOutput(BaseModel):
-    server_version: str = "0.5.0"
+    server_version: str = "0.5.1"
     host: str
     port: int
     initial_banner: str
@@ -72,7 +72,7 @@ class SerialClientInput(BaseModel):
 
 
 class SerialClientOutput(BaseModel):
-    server_version: str = "0.5.0"
+    server_version: str = "0.5.1"
     port: str
     baudrate: int
     initial_banner: str
@@ -154,13 +154,13 @@ class SessionInfo(BaseModel):
     age_seconds: float
     is_active: bool
     total_bytes_received: int
-    server_version: str = "0.5.0"
+    server_version: str = "0.5.1"
 
 
 class SessionListResponse(BaseModel):
     """Response for listing all active sessions."""
 
-    server_version: str = "0.5.0"
+    server_version: str = "0.5.1"
     active_sessions: int
     sessions: Dict[str, SessionInfo]
     note: str = (

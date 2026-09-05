@@ -6,21 +6,28 @@ A unified **Model Context Protocol (MCP)** Terminal Communications Server design
 
 ## Highlights & Features
 
-* **Unified Multi-Session Terminal Architecture (v0.5.0)**: Manages concurrent persistent connections across both Telnet and Serial interfaces within a single server instance.
+* **Unified Multi-Session Terminal Architecture (v0.5.1)**: Manages concurrent persistent connections across both Telnet and Serial interfaces within a single server instance.
 * **Native Serial & USB-UART Console Support (`serial_client`)**: Direct hardware serial communications with configurable baud rate (default: 9600), byte size (8), parity (`N`), stop bits (1.0), and flow control (`rtscts`, `xonxoff`).
 * **Dynamic Live Baud Rate Switching (`serial_set_speed`)**: Dynamically alters UART speed and framing parameters on an active open connection without dropping session state, disconnecting, or losing unconsumed buffer text.
 * **Hardware RS-232 BREAK Condition (`serial_send_break`)**: Generates true RS-232 Break spacing (~250ms) to halt remote targets or VAX CPUs into console firmware (`>>>`).
 * **Serial Port Discovery (`serial_list_ports`)**: Enumerates host hardware serial and USB-UART devices (`/dev/ttyUSB*`, `/dev/ttyS*`).
 * **MCP 180-Second (3-Minute) Timeout Immunity**: Both Telnet and Serial tools implement non-blocking execution windows (`max_wait_seconds`) with background stream accumulation and interim progress returns (`command_completed: false`), preventing client tool aborts during long operations exceeding 3 minutes.
 * **Clean, Human-Readable Transcript Logging (Default)**: Emits a clean, contiguous text stream identical to standard Unix `script` or `picocom` session logging (header, raw readable console text in the body, footer at exit).
-* **Strict No-Overwrite Protection**: Log files are **never overwritten**. Reconnecting with an existing session ID automatically allocates sequential filenames (`<session_id>_1.log`, `<session_id>_2.log`, etc.).
-* **Explicit Server Version Reporting**: The server reports its version (`server_version: "0.5.0"`) directly in tool return models and session log headers.
+* **Single Persistent File Per Session**: Each session maintains exactly one persistent log file (`<session_id>.log`). Sequential commands, streaming output chunks, interactive inputs, and status updates append contiguously without generating fragmented suffix files (`_1.log`, `_2.log`). Reconnecting with an existing session ID safely appends with a clear session start block.
+* **Explicit Server Version Reporting**: The server reports its version (`server_version: "0.5.1"`) directly in tool return models and session log headers.
 * **Optional Packet Markers (`timestamp_chunks = False`)**: Microsecond ISO-8601 chunk headers can be optionally enabled when diagnosing UART latency or byte-framing anomalies.
 * **Unified Session Directory (`list_sessions`)**: Enumerates all active Telnet and Serial sessions with protocol type, target string, uptime, and byte transfer counters.
 
 ---
 
 ## Release History & Changes
+
+### Version 0.5.1
+* **Single Persistent File Per Session**: Fixed an issue where re-instantiating `SessionLogger` on sequential commands caused duplicate suffix files (`<session_id>_1.log`, `<session_id>_2.log`, etc.) to be generated on every tool invocation.
+* **Deterministic Path Resolution**: `get_session_log_path()` now consistently maps each session ID to `<session_id>.log`.
+* **Safe Reconnect Appending**: Starting a new session with an existing session ID cleanly appends a delimited session start header rather than truncating or fragmenting into multiple files.
+* **Preserved Active Session Logger**: Active sessions in both `telnet_client_tool` and `serial_client_tool` retain their configured `session.logger` instance across tool calls.
+* **Automated Regression Tests**: Added `test_telnet_single_log_file_per_session` and `test_serial_single_log_file_per_session` proving that sequential commands, interactive inputs, streaming polling, and session reconnects maintain exactly one file on disk.
 
 ### Version 0.5.0
 * **Unified Terminal Architecture**: Merged serial and telnet capabilities into a single unified package with entrypoints `mcp-terminal-client`, `chuk-mcp-telnet-client`, and `mcp-telnet-client`.
@@ -104,7 +111,7 @@ uv pip install -e .
 ## Authors & Attribution
 
 * **Original Author & Project**: Created by the **Chuk MCP Team** as part of the Chuk Model Context Protocol server suite ([chuk-mcp-telnet-client on PyPI](https://pypi.org/project/chuk-mcp-telnet-client/)).
-* **Enhanced & Maintained by**: **Douglas P. Fields, Jr.** (`symbolics@lisp.engineer`) — Extended into unified Terminal MCP Server (v0.5.0) with USB-Serial console integration, dynamic baud rate switching, hardware RS-232 BREAK signalling, clean transcript logging, and timeout-proof multi-session polling.
+* **Enhanced & Maintained by**: **Douglas P. Fields, Jr.** (`symbolics@lisp.engineer`) — Extended into unified Terminal MCP Server (v0.5.0, v0.5.1) with USB-Serial console integration, dynamic baud rate switching, hardware RS-232 BREAK signalling, single-file persistent transcript logging, and timeout-proof multi-session polling.
   * With Gemini Flash (3.6, 3.7, 3.8) via Antigravity CLI
 
 ---

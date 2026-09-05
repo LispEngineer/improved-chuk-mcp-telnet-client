@@ -1,7 +1,7 @@
 """
 Session logging utilities for Telnet and Serial connections.
 Provides clean terminal transcript logging and optional timestamped debug logging.
-Guarantees that existing log files are never overwritten.
+Guarantees a single persistent log file per session without creating incremental suffix files.
 """
 
 import logging
@@ -45,30 +45,19 @@ class SessionLogger:
     def get_session_log_path(self, session_id: str) -> Optional[str]:
         """
         Generate or retrieve the full path to the session log file.
-        Guarantees that existing files are never overwritten:
-        If <session_id>.log already exists, sequentially generates <session_id>_1.log, etc.
+        Always maps session_id to <log_dir>/<clean_id>.log to guarantee a single
+        log file per session without creating incremental suffix files.
         """
         if not self.log_dir:
             return None
 
-        # If we already resolved a file for this session in this instance, reuse it
         if session_id in self._session_files:
             return self._session_files[session_id]
 
         clean_id = session_id.replace(":", "_").replace("/", "_").replace("\\", "_")
         candidate = os.path.join(self.log_dir, f"{clean_id}.log")
-
-        if not os.path.exists(candidate):
-            self._session_files[session_id] = candidate
-            return candidate
-
-        index = 1
-        while True:
-            candidate = os.path.join(self.log_dir, f"{clean_id}_{index}.log")
-            if not os.path.exists(candidate):
-                self._session_files[session_id] = candidate
-                return candidate
-            index += 1
+        self._session_files[session_id] = candidate
+        return candidate
 
     def log_session_start(
         self,
@@ -93,15 +82,18 @@ class SessionLogger:
         header = (
             f"{'='*80}\n"
             f"{protocol.upper()} SESSION LOG: {target}\n"
-            f"Server Version : chuk-mcp-terminal-client v0.5.0\n"
+            f"Server Version : chuk-mcp-terminal-client v0.5.1\n"
             f"Session ID     : {session_id}\n"
             f"Started At     : {now_str}\n"
             f"{'='*80}\n\n"
         )
         try:
-            # File is guaranteed to be new due to get_session_log_path no-overwrite logic
-            with open(log_path, "w", encoding="utf-8", errors="replace") as f:
-                f.write(header)
+            mode = "a" if os.path.exists(log_path) else "w"
+            with open(log_path, mode, encoding="utf-8", errors="replace") as f:
+                if mode == "a":
+                    f.write(f"\n{header}")
+                else:
+                    f.write(header)
                 if banner:
                     if timestamp_chunks:
                         f.write(f"[{datetime.now().astimezone().isoformat()}] [INITIAL BANNER]\n{banner}\n\n")

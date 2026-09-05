@@ -489,8 +489,10 @@ async def telnet_client_tool(
             )
         await _session_store.store(session)
     else:
-        if session_logger:
+        if session.logger is None and session_logger:
             session.logger = session_logger
+        elif session.logger and timestamp_chunks:
+            session.logger._timestamp_mode[actual_session_id] = True
 
     responses: list[CommandResponse] = []
     all_completed = True
@@ -715,8 +717,10 @@ async def serial_client_tool(
             )
         await _session_store.store(session)
     else:
-        if session_logger:
+        if session.logger is None and session_logger:
             session.logger = session_logger
+        elif session.logger and timestamp_chunks:
+            session.logger._timestamp_mode[actual_session_id] = True
 
     responses: list[CommandResponse] = []
     all_completed = True
