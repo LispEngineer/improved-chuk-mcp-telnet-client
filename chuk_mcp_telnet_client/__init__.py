@@ -1,6 +1,6 @@
 """Terminal (Telnet & Serial) Client MCP Server package."""
 
-__version__ = "0.5.1"
+__version__ = "0.6.0"
 
 from chuk_mcp_telnet_client.tools import (
     telnet_client_tool as telnet_client_tool,
@@ -16,6 +16,9 @@ from chuk_mcp_telnet_client.tools import (
     serial_set_speed as serial_set_speed,
     serial_list_ports as serial_list_ports,
     list_sessions as list_sessions,
+    terminal_get_screen as terminal_get_screen,
+    terminal_send_key as terminal_send_key,
+    terminal_resize as terminal_resize,
 )
 
 __all__ = [
@@ -32,4 +35,7 @@ __all__ = [
     "serial_set_speed",
     "serial_list_ports",
     "list_sessions",
+    "terminal_get_screen",
+    "terminal_send_key",
+    "terminal_resize",
 ]

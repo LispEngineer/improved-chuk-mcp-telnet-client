@@ -20,7 +20,7 @@ class CommandResponse(BaseModel):
 
 
 class TelnetClientOutput(BaseModel):
-    server_version: str = "0.5.1"
+    server_version: str = "0.6.0"
     host: str
     port: int
     initial_banner: str
@@ -72,7 +72,7 @@ class SerialClientInput(BaseModel):
 
 
 class SerialClientOutput(BaseModel):
-    server_version: str = "0.5.1"
+    server_version: str = "0.6.0"
     port: str
     baudrate: int
     initial_banner: str
@@ -154,13 +154,13 @@ class SessionInfo(BaseModel):
     age_seconds: float
     is_active: bool
     total_bytes_received: int
-    server_version: str = "0.5.1"
+    server_version: str = "0.6.0"
 
 
 class SessionListResponse(BaseModel):
     """Response for listing all active sessions."""
 
-    server_version: str = "0.5.1"
+    server_version: str = "0.6.0"
     active_sessions: int
     sessions: Dict[str, SessionInfo]
     note: str = (
@@ -173,3 +173,53 @@ class SessionCloseResponse(BaseModel):
 
     success: bool
     message: str
+
+
+# ============================================================================
+# Terminal Screen / Visual Emulation Models
+# ============================================================================
+
+
+class TerminalScreenOutput(BaseModel):
+    """Rendered 2D screen text matrix and visual attributes from terminal emulation."""
+
+    session_id: str
+    rows: int
+    cols: int
+    cursor_row: int
+    cursor_col: int
+    cursor_visible: bool = True
+    cursor_char: Optional[str] = None
+    screen_text: str
+    annotated_text: str
+    highlighted_lines: List[int]
+    server_version: str = "0.6.0"
+
+
+class TerminalSendKeyOutput(BaseModel):
+    """Result of sending a virtual key or escape sequence to a terminal session."""
+
+    session_id: str
+    key_sent: str
+    bytes_sent: str
+    success: bool
+    message: str
+    screen_text: Optional[str] = None
+    annotated_text: Optional[str] = None
+    cursor_row: Optional[int] = None
+    cursor_col: Optional[int] = None
+    cursor_visible: Optional[bool] = None
+    server_version: str = "0.6.0"
+
+
+class TerminalResizeOutput(BaseModel):
+    """Result of dynamically resizing terminal dimensions."""
+
+    session_id: str
+    cols: int
+    rows: int
+    naws_sent: bool
+    success: bool
+    message: str
+    server_version: str = "0.6.0"
+

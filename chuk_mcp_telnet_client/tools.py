@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import List, Optional, Union
 
+import pyte
 import serial
 import serial.tools.list_ports
 from chuk_mcp_server import tool
@@ -37,6 +38,9 @@ from chuk_mcp_telnet_client.models import (
     TelnetClientOutput,
     TelnetReadSessionOutput,
     TelnetSendInputOutput,
+    TerminalResizeOutput,
+    TerminalScreenOutput,
+    TerminalSendKeyOutput,
 )
 
 logger = logging.getLogger(__name__)
@@ -92,6 +96,22 @@ class TelnetSession:
     reader_task: Optional[asyncio.Task] = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     total_bytes_received: int = 0
+    cols: int = 80
+    rows: int = 24
+    screen: Optional[pyte.Screen] = None
+    stream: Optional[pyte.Stream] = None
+
+    def __post_init__(self):
+        if self.screen is None:
+            self.screen = pyte.Screen(self.cols, self.rows)
+        if self.stream is None:
+            self.stream = pyte.Stream(self.screen)
+            self.stream.use_utf8 = False
+        if self.accumulated_output and self.stream:
+            try:
+                self.stream.feed(self.accumulated_output)
+            except Exception as e:
+                logger.warning(f"Error feeding initial output to pyte screen: {e}")
 
     @property
     def session_type(self) -> str:
@@ -123,6 +143,22 @@ class SerialSession:
     reader_task: Optional[asyncio.Task] = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     total_bytes_received: int = 0
+    cols: int = 80
+    rows: int = 24
+    screen: Optional[pyte.Screen] = None
+    stream: Optional[pyte.Stream] = None
+
+    def __post_init__(self):
+        if self.screen is None:
+            self.screen = pyte.Screen(self.cols, self.rows)
+        if self.stream is None:
+            self.stream = pyte.Stream(self.screen)
+            self.stream.use_utf8 = False
+        if self.accumulated_output and self.stream:
+            try:
+                self.stream.feed(self.accumulated_output)
+            except Exception as e:
+                logger.warning(f"Error feeding initial output to pyte screen: {e}")
 
     @property
     def session_type(self) -> str:
@@ -155,12 +191,35 @@ async def _background_telnet_reader_loop(session: TelnetSession) -> None:
                 continue
 
             if data:
+                # Automatic DEC VT terminal query handling
+                if b"\x1b[c" in data or b"\x1b[0c" in data or b"\x1bZ" in data:
+                    try:
+                        session.telnet.write(b"\x1b[?62;1;2;6;7;8;9c")
+                    except Exception as e:
+                        logger.warning(f"Failed to respond to VT DA query: {e}")
+                if b"\x1b[6n" in data:
+                    try:
+                        cpr_reply = f"\x1b[{session.rows};{session.cols}R".encode("utf-8")
+                        session.telnet.write(cpr_reply)
+                    except Exception as e:
+                        logger.warning(f"Failed to respond to VT CPR query: {e}")
+                if b"\x1b[5n" in data:
+                    try:
+                        session.telnet.write(b"\x1b[0n")
+                    except Exception as e:
+                        logger.warning(f"Failed to respond to VT DSR query: {e}")
+
                 text = data.decode("utf-8", errors="ignore")
                 async with session.lock:
                     session.accumulated_output += text
                     session.unconsumed_output += text
                     session.total_bytes_received += len(data)
                     session.last_activity = time.time()
+                    if session.stream:
+                        try:
+                            session.stream.feed(text)
+                        except Exception as e:
+                            logger.warning(f"Error feeding telnet text to pyte stream: {e}")
 
                 if session.logger:
                     session.logger.log_stream_chunk(
@@ -192,12 +251,35 @@ async def _background_serial_reader_loop(session: SerialSession) -> None:
                 continue
 
             if data:
+                # Automatic DEC VT terminal query handling
+                if b"\x1b[c" in data or b"\x1b[0c" in data or b"\x1bZ" in data:
+                    try:
+                        session.serial.write(b"\x1b[?62;1;2;6;7;8;9c")
+                    except Exception as e:
+                        logger.warning(f"Failed to respond to VT DA query: {e}")
+                if b"\x1b[6n" in data:
+                    try:
+                        cpr_reply = f"\x1b[{session.rows};{session.cols}R".encode("utf-8")
+                        session.serial.write(cpr_reply)
+                    except Exception as e:
+                        logger.warning(f"Failed to respond to VT CPR query: {e}")
+                if b"\x1b[5n" in data:
+                    try:
+                        session.serial.write(b"\x1b[0n")
+                    except Exception as e:
+                        logger.warning(f"Failed to respond to VT DSR query: {e}")
+
                 text = data.decode("utf-8", errors="ignore")
                 async with session.lock:
                     session.accumulated_output += text
                     session.unconsumed_output += text
                     session.total_bytes_received += len(data)
                     session.last_activity = time.time()
+                    if session.stream:
+                        try:
+                            session.stream.feed(text)
+                        except Exception as e:
+                            logger.warning(f"Error feeding serial text to pyte stream: {e}")
 
                 if session.logger:
                     session.logger.log_stream_chunk(
@@ -283,11 +365,18 @@ _session_store = SessionStore()
 
 
 def _create_negotiation_callback():
-    """Handle telnet option negotiation."""
+    """Handle telnet option negotiation including RFC 1073 NAWS."""
 
     def callback(sock, cmd, opt):
         if cmd == TelnetCommand.DO.value:
-            sock.sendall(TelnetCommand.IAC.value + TelnetCommand.WONT.value + opt)
+            if opt == bytes([31]):  # RFC 1073 NAWS (Negotiate About Window Size)
+                # Agree to provide window size: IAC WILL NAWS
+                sock.sendall(TelnetCommand.IAC.value + TelnetCommand.WILL.value + opt)
+                # Transmit initial 80 columns x 24 rows subnegotiation:
+                # IAC SB NAWS 0 80 0 24 IAC SE
+                sock.sendall(bytes([255, 250, 31, 0, 80, 0, 24, 255, 240]))
+            else:
+                sock.sendall(TelnetCommand.IAC.value + TelnetCommand.WONT.value + opt)
         elif cmd == TelnetCommand.WILL.value:
             sock.sendall(TelnetCommand.IAC.value + TelnetCommand.DONT.value + opt)
 
@@ -1076,3 +1165,268 @@ async def list_sessions() -> SessionListResponse:
 async def telnet_list_sessions() -> SessionListResponse:
     """Deprecated alias for list_sessions."""
     return await list_sessions()
+
+
+# ============================================================================
+# Terminal Screen / Visual Emulation Tools
+# ============================================================================
+
+
+KEY_SEQUENCES: dict[str, bytes] = {
+    # Cursor / Arrow keys
+    "UP": b"\x1b[A",
+    "DOWN": b"\x1b[B",
+    "RIGHT": b"\x1b[C",
+    "LEFT": b"\x1b[D",
+
+    # Common control keys
+    "ENTER": b"\r",
+    "RETURN": b"\r",
+    "CR": b"\r",
+    "LF": b"\n",
+    "TAB": b"\t",
+    "BACKSPACE": b"\x7f",
+    "DELETE": b"\x1b[3~",
+    "ESC": b"\x1b",
+    "ESCAPE": b"\x1b",
+    "SPACE": b" ",
+
+    # DEC VT Editing keypad
+    "FIND": b"\x1b[1~",
+    "INSERT": b"\x1b[2~",
+    "INSERT_HERE": b"\x1b[2~",
+    "REMOVE": b"\x1b[3~",
+    "SELECT": b"\x1b[4~",
+    "PREV": b"\x1b[5~",
+    "PREV_SCREEN": b"\x1b[5~",
+    "PAGE_UP": b"\x1b[5~",
+    "NEXT": b"\x1b[6~",
+    "NEXT_SCREEN": b"\x1b[6~",
+    "PAGE_DOWN": b"\x1b[6~",
+
+    # DEC VT Numeric keypad (PF1-PF4)
+    "PF1": b"\x1bOP",
+    "PF2": b"\x1bOQ",
+    "PF3": b"\x1bOR",
+    "PF4": b"\x1bOS",
+    "F1": b"\x1bOP",
+    "F2": b"\x1bOQ",
+    "F3": b"\x1bOR",
+    "F4": b"\x1bOS",
+
+    # DEC VT Function keys (F6-F20)
+    "F6": b"\x1b[17~",
+    "F7": b"\x1b[18~",
+    "F8": b"\x1b[19~",
+    "F9": b"\x1b[20~",
+    "F10": b"\x1b[21~",
+    "F11": b"\x1b[23~",
+    "F12": b"\x1b[24~",
+    "F13": b"\x1b[25~",
+    "F14": b"\x1b[26~",
+    "HELP": b"\x1b[28~",
+    "F15": b"\x1b[28~",
+    "DO": b"\x1b[29~",
+    "F16": b"\x1b[29~",
+    "F17": b"\x1b[31~",
+    "F18": b"\x1b[32~",
+    "F19": b"\x1b[33~",
+    "F20": b"\x1b[34~",
+}
+
+# Add CTRL_A through CTRL_Z
+for _i in range(1, 27):
+    _ch = chr(ord("A") + _i - 1)
+    KEY_SEQUENCES[f"CTRL_{_ch}"] = bytes([_i])
+    KEY_SEQUENCES[f"CTRL-{_ch}"] = bytes([_i])
+
+
+def _extract_screen_output(session: Union[TelnetSession, SerialSession]) -> TerminalScreenOutput:
+    """Render 2D screen text and annotate reverse-video highlighted cells."""
+    screen = session.screen
+    if screen is None:
+        return TerminalScreenOutput(
+            session_id=session.session_id,
+            rows=session.rows,
+            cols=session.cols,
+            cursor_row=1,
+            cursor_col=1,
+            cursor_visible=True,
+            cursor_char=" ",
+            screen_text="",
+            annotated_text="",
+            highlighted_lines=[],
+        )
+
+    screen_lines = [line.rstrip() for line in screen.display]
+    annotated_lines = []
+    highlighted_lines = []
+
+    for y in range(screen.lines):
+        line_chars = [screen.buffer[y][x] for x in range(screen.columns)]
+        line_str = ""
+        in_rev = False
+        rev_buf = ""
+        has_rev = False
+
+        for ch in line_chars:
+            if ch.reverse:
+                has_rev = True
+                if not in_rev:
+                    in_rev = True
+                    rev_buf = ch.data
+                else:
+                    rev_buf += ch.data
+            else:
+                if in_rev:
+                    in_rev = False
+                    line_str += f"* [{rev_buf}] *"
+                    rev_buf = ""
+                line_str += ch.data
+
+        if in_rev:
+            line_str += f"* [{rev_buf}] *"
+
+        if has_rev:
+            highlighted_lines.append(y + 1)
+        annotated_lines.append(line_str.rstrip())
+
+    cursor_char = None
+    try:
+        cursor_char = screen.buffer[screen.cursor.y][screen.cursor.x].data
+    except Exception:
+        pass
+
+    return TerminalScreenOutput(
+        session_id=session.session_id,
+        rows=screen.lines,
+        cols=screen.columns,
+        cursor_row=screen.cursor.y + 1,
+        cursor_col=screen.cursor.x + 1,
+        cursor_visible=not screen.cursor.hidden,
+        cursor_char=cursor_char,
+        screen_text="\n".join(screen_lines),
+        annotated_text="\n".join(annotated_lines),
+        highlighted_lines=highlighted_lines,
+    )
+
+
+@tool(name="terminal_get_screen")
+async def terminal_get_screen(
+    session_id: str,
+    wait_seconds: float = 0.0,
+) -> TerminalScreenOutput:
+    """Inspect the rendered 2D terminal canvas, cursor position, and highlighted reverse-video text."""
+    session = await _session_store.get(session_id)
+    if session is None:
+        raise ValueError(f"No active session found with ID '{session_id}'")
+
+    if wait_seconds > 0:
+        await asyncio.sleep(wait_seconds)
+
+    async with session.lock:
+        return _extract_screen_output(session)
+
+
+@tool(name="terminal_send_key")
+async def terminal_send_key(
+    session_id: str,
+    key: str,
+    wait_seconds: float = 0.5,
+) -> TerminalSendKeyOutput:
+    """Send a keyboard key or VT escape sequence (e.g. UP, DOWN, TAB, ENTER, ESC, CTRL_Z) to a terminal session."""
+    session = await _session_store.get(session_id)
+    if session is None:
+        raise ValueError(f"No active session found with ID '{session_id}'")
+
+    key_normalized = key.strip()
+    key_upper = key_normalized.upper()
+    if key_upper in KEY_SEQUENCES:
+        payload = KEY_SEQUENCES[key_upper]
+    elif len(key_normalized) == 1:
+        payload = key_normalized.encode("utf-8")
+    else:
+        # Fallback: interpret as utf-8 literal sequence
+        payload = key_normalized.encode("utf-8")
+
+    if isinstance(session, TelnetSession):
+        await asyncio.to_thread(session.telnet.write, payload)
+    elif isinstance(session, SerialSession):
+        await asyncio.to_thread(session.serial.write, payload)
+    else:
+        raise ValueError(f"Unsupported session type for session '{session_id}'")
+
+    if session.logger:
+        session.logger.log_input(session_id=session_id, input_text=f"KEY:{key_normalized}")
+
+    if wait_seconds > 0:
+        await asyncio.sleep(wait_seconds)
+
+    async with session.lock:
+        screen_output = _extract_screen_output(session)
+
+    return TerminalSendKeyOutput(
+        session_id=session_id,
+        key_sent=key,
+        bytes_sent=repr(payload),
+        success=True,
+        message=f"Key '{key}' ({repr(payload)}) sent to session '{session_id}'.",
+        screen_text=screen_output.screen_text,
+        annotated_text=screen_output.annotated_text,
+        cursor_row=screen_output.cursor_row,
+        cursor_col=screen_output.cursor_col,
+        cursor_visible=screen_output.cursor_visible,
+    )
+
+
+@tool(name="terminal_resize")
+async def terminal_resize(
+    session_id: str,
+    cols: int = 80,
+    rows: int = 24,
+) -> TerminalResizeOutput:
+    """Dynamically resize the virtual terminal canvas and send RFC 1073 Telnet NAWS window resize negotiation."""
+    session = await _session_store.get(session_id)
+    if session is None:
+        raise ValueError(f"No active session found with ID '{session_id}'")
+
+    if cols <= 0 or rows <= 0:
+        raise ValueError(f"Invalid terminal dimensions: cols={cols}, rows={rows}")
+
+    naws_sent = False
+    async with session.lock:
+        session.cols = cols
+        session.rows = rows
+        if session.screen:
+            session.screen.resize(lines=rows, columns=cols)
+
+    if isinstance(session, TelnetSession):
+        try:
+            # RFC 1073: IAC SB NAWS <width_hi> <width_lo> <height_hi> <height_lo> IAC SE
+            naws_bytes = bytes([
+                255, 250, 31,
+                (cols >> 8) & 0xff, cols & 0xff,
+                (rows >> 8) & 0xff, rows & 0xff,
+                255, 240,
+            ])
+            sock = session.telnet.get_socket()
+            if sock:
+                await asyncio.to_thread(sock.sendall, naws_bytes)
+                naws_sent = True
+        except Exception as e:
+            logger.warning(f"Failed to transmit Telnet NAWS resize packet: {e}")
+
+    if session.logger:
+        session.logger.log_config_change(
+            session_id=session_id,
+            change_description=f"Terminal resized to {cols}x{rows} (NAWS: {naws_sent})",
+        )
+
+    return TerminalResizeOutput(
+        session_id=session_id,
+        cols=cols,
+        rows=rows,
+        naws_sent=naws_sent,
+        success=True,
+        message=f"Terminal session '{session_id}' resized to {cols} columns x {rows} rows (NAWS sent: {naws_sent}).",
+    )
