@@ -105,6 +105,7 @@ uv pip install -e .
 
 * **Original Author & Project**: Created by the **Chuk MCP Team** as part of the Chuk Model Context Protocol server suite ([chuk-mcp-telnet-client on PyPI](https://pypi.org/project/chuk-mcp-telnet-client/)).
 * **Enhanced & Maintained by**: **Douglas P. Fields, Jr.** (`symbolics@lisp.engineer`) — Extended into unified Terminal MCP Server (v0.5.0) with USB-Serial console integration, dynamic baud rate switching, hardware RS-232 BREAK signalling, clean transcript logging, and timeout-proof multi-session polling.
+  * With Gemini Flash (3.6, 3.7, 3.8) via Antigravity CLI
 
 ---
 
