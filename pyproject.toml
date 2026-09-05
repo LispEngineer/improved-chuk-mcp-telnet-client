@@ -4,10 +4,10 @@ build-backend = "hatchling.build"
 
 [project]
 name = "chuk-mcp-telnet-client"
-version = "0.4.0"
-description = "MCP Telnet Client with Background Stream Buffering, Non-Blocking Polling, and Disk Logging"
+version = "0.5.0"
+description = "Unified MCP Terminal Client (Telnet & Serial) with Background Stream Buffering, Non-Blocking Polling, and Clean Disk Logging"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11, <3.13"
 license = { text = "MIT" }
 authors = [
     { name = "Chuk MCP Team" },
@@ -18,11 +18,13 @@ dependencies = [
     "pydantic>=2.11.2",
     "pyyaml>=6.0.2",
     "telnetlib3>=2.0.4",
+    "pyserial>=3.5",
 ]
 
 [project.scripts]
 chuk-mcp-telnet-client = "chuk_mcp_telnet_client.main:main"
 mcp-telnet-client = "chuk_mcp_telnet_client.main:main"
+mcp-terminal-client = "chuk_mcp_telnet_client.main:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["chuk_mcp_telnet_client"]
