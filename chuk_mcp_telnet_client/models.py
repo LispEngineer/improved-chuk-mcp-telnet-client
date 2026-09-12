@@ -20,7 +20,7 @@ class CommandResponse(BaseModel):
 
 
 class TelnetClientOutput(BaseModel):
-    server_version: str = "0.6.0"
+    server_version: str = "0.6.1"
     host: str
     port: int
     initial_banner: str
@@ -72,7 +72,7 @@ class SerialClientInput(BaseModel):
 
 
 class SerialClientOutput(BaseModel):
-    server_version: str = "0.6.0"
+    server_version: str = "0.6.1"
     port: str
     baudrate: int
     initial_banner: str
@@ -154,13 +154,13 @@ class SessionInfo(BaseModel):
     age_seconds: float
     is_active: bool
     total_bytes_received: int
-    server_version: str = "0.6.0"
+    server_version: str = "0.6.1"
 
 
 class SessionListResponse(BaseModel):
     """Response for listing all active sessions."""
 
-    server_version: str = "0.6.0"
+    server_version: str = "0.6.1"
     active_sessions: int
     sessions: Dict[str, SessionInfo]
     note: str = (
@@ -193,7 +193,7 @@ class TerminalScreenOutput(BaseModel):
     screen_text: str
     annotated_text: str
     highlighted_lines: List[int]
-    server_version: str = "0.6.0"
+    server_version: str = "0.6.1"
 
 
 class TerminalSendKeyOutput(BaseModel):
@@ -209,7 +209,7 @@ class TerminalSendKeyOutput(BaseModel):
     cursor_row: Optional[int] = None
     cursor_col: Optional[int] = None
     cursor_visible: Optional[bool] = None
-    server_version: str = "0.6.0"
+    server_version: str = "0.6.1"
 
 
 class TerminalResizeOutput(BaseModel):
@@ -221,5 +221,5 @@ class TerminalResizeOutput(BaseModel):
     naws_sent: bool
     success: bool
     message: str
-    server_version: str = "0.6.0"
+    server_version: str = "0.6.1"
 

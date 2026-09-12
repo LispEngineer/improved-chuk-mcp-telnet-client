@@ -70,7 +70,44 @@ class TerminalDefaults:
     RESPONSE_WAIT: float = 1.0
     READ_TIMEOUT: int = 5
     MAX_WAIT_SECONDS: float = 20.0
-    PROMPT_PATTERN: str = r"(?m)(^\$ |Username: |Password: |>>> )"
+    # Matches, in order:
+    #   1. (?m:^\$ )            - a bare "$ " DCL prompt at the start of any line
+    #                             (stock, uncustomized OpenVMS SYLOGIN.COM).
+    #   2. \$ ?$                - "...$" / "...$ " at the TRUE END of the accumulated
+    #                             buffer (no (?m) scope here - $ means "end of the whole
+    #                             string", not "end of any line"). This is what actually
+    #                             catches a customized DCL prompt like "VAX96::USER1$ "
+    #                             regardless of the node/username prefix: real VMS sites
+    #                             commonly set SYLOGIN.COM to show "NODE::USER$ " instead
+    #                             of a bare "$ ", and the previous pattern (anchored to
+    #                             line-start) never matched that at all. Anchoring to the
+    #                             true end of the buffer (rather than (?m)'s "any line")
+    #                             matters here specifically because _wait_for_output()
+    #                             re-searches the whole accumulated-so-far buffer on every
+    #                             poll - "the prompt is the last thing we've received" is
+    #                             the correct completion signal, not "some earlier line
+    #                             happened to end in $" while more output is still coming.
+    #   3. (?m:^[A-Za-z][A-Za-z0-9_ /]*> ?$) - VMS subsystem/utility prompts, which are a
+    #                             different shape entirely: "facility name, then >, maybe
+    #                             a trailing space" - e.g. TCPIP>, MCL>, NCP>, AUTHORIZE>,
+    #                             SET HOST 0>, ANALYZE/SYSTEM>. Kept deliberately narrow
+    #                             (letters/digits/underscore/space/slash only) rather than
+    #                             ".*" to avoid matching arbitrary program output that
+    #                             happens to end a line in "word>".
+    #   4/5. Username: / Password: - login prompts, unchanged.
+    #   6. >>>                  - VAX/Alpha console firmware prompt, unchanged.
+    # See PLAN_DEFAULT_PROMPT_PATTERN.md for the full design rationale, evidence of the
+    # original gap, and remaining known limitations.
+    PROMPT_PATTERN: str = (
+        r"("
+        r"(?m:^\$ )"
+        r"|\$ ?$"
+        r"|(?m:^[A-Za-z][A-Za-z0-9_ /]*> ?$)"
+        r"|Username: "
+        r"|Password: "
+        r"|>>> "
+        r")"
+    )
 
 
 # ============================================================================
@@ -577,6 +614,18 @@ async def telnet_client_tool(
                 timestamp_chunks=timestamp_chunks,
             )
         await _session_store.store(session)
+
+        # If a prompt pattern is provided for a new session, ensure the initial prompt
+        # (e.g. 'Username: ' or shell prompt) has arrived before sending commands.
+        if prompt_pattern and commands:
+            compiled = re.compile(prompt_pattern)
+            if not compiled.search(session.accumulated_output):
+                await _wait_for_output(
+                    session=session,
+                    start_index=0,
+                    max_wait_seconds=min(max_wait_seconds, 15.0),
+                    prompt_pattern=prompt_pattern,
+                )
     else:
         if session.logger is None and session_logger:
             session.logger = session_logger
@@ -1399,6 +1448,7 @@ async def terminal_resize(
         session.rows = rows
         if session.screen:
             session.screen.resize(lines=rows, columns=cols)
+            session.screen.tabstops = set(range(8, cols, 8))
 
     if isinstance(session, TelnetSession):
         try:

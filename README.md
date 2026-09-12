@@ -28,6 +28,20 @@ A unified **Model Context Protocol (MCP)** Terminal Communications Server design
 
 ## Release History & Changes
 
+### Version 0.6.1
+* **Fixed the default `prompt_pattern` for real-world OpenVMS use**: the
+  previous default (`r"(?m)(^\$ |Username: |Password: |>>> )"`) required a
+  bare `$ ` at the start of a line, so it never matched a
+  SYLOGIN.COM-customized DCL prompt like `VAX96::USER1$ ` - every
+  `telnet_client`/`serial_client` call relying on the default against such
+  a system silently stopped detecting command completion after login,
+  executing only the first queued command. The new default also adds VMS
+  subsystem/utility prompts (`TCPIP>`, `MCL>`, `NCP>`, `AUTHORIZE>`,
+  `SET HOST 0>`, `ANALYZE/SYSTEM>`, ...), which the old default never
+  covered at all. See `PLAN_DEFAULT_PROMPT_PATTERN.md` for the full design
+  rationale, and the "Default `prompt_pattern`" note under MCP Tools
+  Reference below for what it now matches.
+
 ### Version 0.6.0
 * **Virtual Terminal Screen Emulation (`pyte`)**:
   * Integrated `pyte` (v0.8.2) in-memory DEC VT terminal emulation into both `TelnetSession` and `SerialSession`.
@@ -99,6 +113,21 @@ The server exposes 16 MCP tools across Telnet, Serial, and Visual Terminal categ
 | `serial_close_session` | Serial | Explicitly closes an active serial session and finalizes log files. | `session_id` |
 | `list_sessions` | Unified | Lists all active terminal sessions (both Telnet and Serial) with protocol and byte statistics. | *(None)* |
 | `telnet_list_sessions` | Unified | Backward-compatible alias for `list_sessions`. | *(None)* |
+
+**Default `prompt_pattern` (v0.6.1+)**: when a tool takes `prompt_pattern` but
+none is given, it falls back to a default built for OpenVMS DCL and its
+subsystem utilities out of the box:
+* a bare `$ ` DCL prompt, **or** a SYLOGIN.COM-customized `NODE::USER$ `
+  prompt (any node/username), matched at the true end of the received
+  output;
+* a VMS subsystem/utility prompt of the shape "*facility name*`>`" - e.g.
+  `TCPIP>`, `MCL>`, `NCP>`, `AUTHORIZE>`, `SET HOST 0>`, `ANALYZE/SYSTEM>`;
+* `Username: ` / `Password: ` login prompts;
+* the VAX/Alpha console firmware prompt `>>> `.
+
+Pass an explicit `prompt_pattern` to override this for a specific prompt
+you already know (e.g. while inside a nested subsystem, to detect only
+that subsystem's own prompt rather than "some prompt, of some kind").
 
 ---
 

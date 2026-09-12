@@ -191,3 +191,33 @@ def test_naws_negotiation_callback():
     mock_sock.sendall.assert_called_once_with(
         TelnetCommand.IAC.value + TelnetCommand.WONT.value + bytes([1])
     )
+
+
+def test_terminal_resize_updates_tabstops():
+    """Verify that resizing to wide geometry (e.g. 132 columns) updates tabstops beyond col 72."""
+    async def _test():
+        mock_telnet = MagicMock()
+        mock_telnet.get_socket.return_value = MagicMock()
+        session = TelnetSession(
+            telnet=mock_telnet,
+            host="127.0.0.1",
+            port=23,
+            created_at=0.0,
+            session_id="test_resize_tabstops",
+            cols=80,
+            rows=24,
+        )
+        await _session_store.store(session)
+        try:
+            assert max(session.screen.tabstops) == 72
+            await terminal_resize(session_id="test_resize_tabstops", cols=132, rows=53)
+            assert session.cols == 132
+            assert session.rows == 53
+            assert max(session.screen.tabstops) == 128
+            assert 80 in session.screen.tabstops
+            assert 120 in session.screen.tabstops
+        finally:
+            await _session_store.delete("test_resize_tabstops")
+
+    asyncio.run(_test())
+

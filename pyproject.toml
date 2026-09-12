@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "chuk-mcp-telnet-client"
-version = "0.6.0"
+version = "0.6.1"
 description = "Unified MCP Terminal Client (Telnet & Serial) with Background Stream Buffering, Non-Blocking Polling, Clean Disk Logging, and Pyte VT Terminal Emulation"
 readme = "README.md"
 requires-python = ">=3.11, <3.13"
