@@ -7,6 +7,7 @@ import asyncio
 import os
 import pty
 import shutil
+import socket
 import tempfile
 import threading
 import time
@@ -24,6 +25,7 @@ from chuk_mcp_telnet_client.tools import (
     telnet_client_tool,
     telnet_close_session,
     list_sessions,
+    _normalize_serial_target,
 )
 from tests.test_standalone_telnet import MockTelnetServer
 
@@ -463,4 +465,220 @@ def test_serial_single_log_file_per_session(temp_log_dir):
             vax.stop()
 
     asyncio.run(_test())
+
+
+# ============================================================================
+# Network Serial Bridge (RFC 2217 & Raw Socket) Tests
+# ============================================================================
+
+
+class MockTcpSerialServer:
+    """Mock TCP server simulating a network serial bridge (e.g. ser2net)."""
+
+    def __init__(self):
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sock.bind(("127.0.0.1", 0))
+        self.port = self.sock.getsockname()[1]
+        self.sock.listen(1)
+        self.running = True
+        self.client_conn = None
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def _run(self):
+        try:
+            self.sock.settimeout(2.0)
+            while self.running:
+                try:
+                    conn, _ = self.sock.accept()
+                    self.client_conn = conn
+                    conn.sendall(b"\r\nUsername: ")
+                    buf = b""
+                    while self.running:
+                        data = conn.recv(1024)
+                        if not data:
+                            break
+                        buf += data
+                        while b"\r" in buf or b"\n" in buf:
+                            for sep in [b"\r\n", b"\n", b"\r"]:
+                                if sep in buf:
+                                    line, _, buf = buf.partition(sep)
+                                    cmd = line.decode(errors="ignore").strip()
+                                    if cmd == "SYSTEM":
+                                        conn.sendall(b"\r\nPassword: ")
+                                    elif cmd == "sysvax60":
+                                        conn.sendall(b"\r\n$ ")
+                                    elif cmd == "SHOW TIME":
+                                        conn.sendall(b"\r\n   16-SEP-2026 07:00:00\r\n$ ")
+                                    elif cmd:
+                                        conn.sendall(f"\r\nOK: {cmd}\r\n$ ".encode())
+                                    break
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+        finally:
+            if self.client_conn:
+                try:
+                    self.client_conn.close()
+                except OSError:
+                    pass
+            try:
+                self.sock.close()
+            except OSError:
+                pass
+
+    def stop(self):
+        self.running = False
+        if self.client_conn:
+            try:
+                self.client_conn.close()
+            except OSError:
+                pass
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+
+def test_normalize_serial_target():
+    """Verify URL normalization for serial port targets."""
+    # Local device paths should remain unchanged
+    assert _normalize_serial_target("/dev/ttyUSB0") == "/dev/ttyUSB0"
+    assert _normalize_serial_target("/dev/vax_4000_60") == "/dev/vax_4000_60"
+    assert _normalize_serial_target("COM1") == "COM1"
+
+    # Explicit URLs should remain unchanged
+    assert _normalize_serial_target("rfc2217://127.0.0.1:7001") == "rfc2217://127.0.0.1:7001"
+    assert _normalize_serial_target("socket://192.168.1.5:2000") == "socket://192.168.1.5:2000"
+    assert _normalize_serial_target("loop://") == "loop://"
+
+    # host:port format should default to rfc2217://
+    assert _normalize_serial_target("127.0.0.1:7001") == "rfc2217://127.0.0.1:7001"
+    assert _normalize_serial_target("localhost:7004") == "rfc2217://localhost:7004"
+    assert _normalize_serial_target("vintagate.local:7001") == "rfc2217://vintagate.local:7001"
+    assert _normalize_serial_target("[::1]:7001") == "rfc2217://[::1]:7001"
+
+
+def test_network_serial_raw_socket():
+    """Verify serial operations over a raw TCP socket bridge (socket://host:port)."""
+    server = MockTcpSerialServer()
+    session_id = f"test_net_serial_{int(time.time())}"
+
+    async def _test():
+        try:
+            url = f"socket://127.0.0.1:{server.port}"
+            res = await serial_client_tool(
+                port=url,
+                commands=["SYSTEM", "sysvax60", "SHOW TIME"],
+                serial_session_id=session_id,
+                close_session=False,
+                max_wait_seconds=5.0,
+            )
+            assert res.command_completed is True
+            assert res.server_version == "0.7.0"
+            assert any("16-SEP-2026" in r.response for r in res.responses)
+
+            # Test session info in list_sessions
+            sessions_res = await list_sessions()
+            assert session_id in sessions_res.sessions
+            s_info = sessions_res.sessions[session_id]
+            assert s_info.session_type == "serial"
+            assert "socket://127.0.0.1:" in s_info.target
+
+            await serial_close_session(session_id)
+        finally:
+            server.stop()
+
+    asyncio.run(_test())
+
+
+def test_network_serial_break_rejected_on_raw_socket():
+    """Verify serial_send_break returns clear error on raw TCP sockets."""
+    server = MockTcpSerialServer()
+    session_id = f"test_net_break_{int(time.time())}"
+
+    async def _test():
+        try:
+            url = f"socket://127.0.0.1:{server.port}"
+            await serial_client_tool(
+                port=url,
+                commands=["SYSTEM"],
+                serial_session_id=session_id,
+                close_session=False,
+                max_wait_seconds=5.0,
+            )
+
+            # Sending break over raw socket must return informative error
+            break_res = await serial_send_break(session_id=session_id)
+            assert break_res.success is False
+            assert "raw TCP socket" in break_res.message
+            assert "RFC 2217" in break_res.message
+
+            await serial_close_session(session_id)
+        finally:
+            server.stop()
+
+    asyncio.run(_test())
+
+
+def test_network_serial_fallback_from_host_port():
+    """Verify connecting to host:port falls back to socket:// if RFC 2217 negotiation fails."""
+    server = MockTcpSerialServer()
+    session_id = f"test_net_fallback_{int(time.time())}"
+
+    async def _test():
+        try:
+            target = f"127.0.0.1:{server.port}"
+            res = await serial_client_tool(
+                port=target,
+                commands=["SYSTEM", "sysvax60"],
+                serial_session_id=session_id,
+                close_session=True,
+                max_wait_seconds=5.0,
+            )
+            assert res.command_completed is True
+            assert res.server_version == "0.7.0"
+        finally:
+            server.stop()
+
+    asyncio.run(_test())
+
+
+def test_serial_custom_newline():
+    """Verify custom newline parameter (e.g. '\\r' for VMS serial console)."""
+    server = MockTcpSerialServer()
+    session_id = f"test_net_newline_{int(time.time())}"
+
+    async def _test():
+        try:
+            url = f"socket://127.0.0.1:{server.port}"
+            res = await serial_client_tool(
+                port=url,
+                commands=["SYSTEM", "sysvax60"],
+                newline="\r",
+                serial_session_id=session_id,
+                close_session=False,
+                max_wait_seconds=5.0,
+            )
+            assert res.command_completed is True
+
+            # Also test serial_send_input with custom newline
+            inp_res = await serial_send_input(
+                session_id=session_id,
+                input_text="SHOW TIME",
+                newline="\r",
+                prompt_pattern=r"(?m)^\$ ",
+                max_wait_seconds=5.0,
+            )
+            assert inp_res.command_completed is True
+            assert "16-SEP-2026" in inp_res.response
+
+            await serial_close_session(session_id)
+        finally:
+            server.stop()
+
+    asyncio.run(_test())
+
 

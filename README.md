@@ -6,6 +6,9 @@ A unified **Model Context Protocol (MCP)** Terminal Communications Server design
 
 ## Highlights & Features
 
+* **Network-Bridged Serial Console Support (RFC 2217 & Raw Sockets, v0.7.0)**: `serial_client` seamlessly connects to remote network-bridged serial ports via `rfc2217://host:port`, `socket://host:port`, or auto-detected `host:port` (e.g. through `ser2net`).
+* **Hardware RS-232 BREAK over the Network (v0.7.0)**: `serial_send_break` transmits true RS-232 Break signals over RFC 2217 network connections to halt remote targets or VAX CPUs into console firmware (`>>>`).
+* **Configurable Command Line Terminators (`newline`, v0.7.0)**: Supports custom newline strings across Telnet and Serial tools (default `\r\n`, with `\r` for OpenVMS serial consoles).
 * **Virtual Terminal Screen Emulation (v0.6.0)**: In-memory DEC VT100 / VT220 terminal emulation powered by `pyte` (v0.8.2), providing AI agents with visual inspection of full-screen TUI applications (OpenVMS SMG$, curses, text editors, menu systems).
 * **2D Canvas Inspection (`terminal_get_screen`)**: Extracts a clean 2D text matrix (default 80×24, dynamically resizable) along with 1-based cursor coordinates (`cursor_row`, `cursor_col`) and cursor visibility.
 * **DEC Special Graphics Translation**: Translates DEC line-drawing character sets into clean Unicode box characters (`┌`, `─`, `┐`, `└`, `┘`, `│`, `┼`, `├`, `┤`, `┴`, `┬`) for native TUI border and window rendering.
@@ -21,12 +24,28 @@ A unified **Model Context Protocol (MCP)** Terminal Communications Server design
 * **MCP 180-Second (3-Minute) Timeout Immunity**: Both Telnet and Serial tools implement non-blocking execution windows (`max_wait_seconds`) with background stream accumulation and interim progress returns (`command_completed: false`), preventing client tool aborts during long operations exceeding 3 minutes.
 * **Clean, Human-Readable Transcript Logging (Default)**: Emits a clean, contiguous text stream identical to standard Unix `script` or `picocom` session logging (header, raw readable console text in the body, footer at exit).
 * **Single Persistent File Per Session**: Each session maintains exactly one persistent log file (`<session_id>.log`). Sequential commands, streaming output chunks, interactive inputs, and status updates append contiguously without generating fragmented suffix files (`_1.log`, `_2.log`). Reconnecting with an existing session ID safely appends with a clear session start block.
-* **Explicit Server Version Reporting**: The server reports its version (`server_version: "0.6.0"`) directly in tool return models and session log headers.
+* **Explicit Server Version Reporting**: The server reports its version (`server_version: "0.7.0"`) directly in tool return models and session log headers.
 * **Unified Session Directory (`list_sessions`)**: Enumerates all active Telnet and Serial sessions with protocol type, target string, uptime, and byte transfer counters.
 
 ---
 
 ## Release History & Changes
+
+### Version 0.7.0
+* **Network-Bridged Serial Console Support (`serial_client`)**:
+  * Added native network URL support via `pyserial`'s `serial_for_url`: supports `rfc2217://host:port`, `socket://host:port`, and `loop://`.
+  * Automatic target URL normalization: targets supplied as `host:port` (e.g. `127.0.0.1:7001` or `vintagate:7001`) automatically default to `rfc2217://host:port` to enable full COM port control, baud rate switching, and break signalling.
+  * Automatic raw TCP fallback: if connecting to `host:port` fails due to remote RFC 2217 negotiation rejection, `_connect_serial` automatically falls back to raw `socket://host:port`.
+* **Hardware RS-232 BREAK over Network (`serial_send_break`)**:
+  * Supports transmitting hardware BREAK signals over RFC 2217 network connections to halt remote targets and VAX CPUs into console firmware (`>>>`).
+  * Explicit validation and error reporting when attempting BREAK over raw TCP sockets (`socket://`), informing the user that RFC 2217 (`accepter: telnet(rfc2217)...`) is required.
+* **Configurable Command Line Terminators (`newline`)**:
+  * Added `newline` parameter (default `\r\n`) across `serial_client`, `serial_send_input`, `telnet_client`, and `telnet_send_input`.
+  * Allows passing `newline="\r"` for OpenVMS serial consoles (`_OPA0:`) to avoid carriage return + newline entering empty passwords or triggering invalid login errors.
+* **Silent Socket & Bannerless Connection Robustness**:
+  * Enhanced `_connect_telnet` with safe non-blocking banner reading to prevent hangs or unhandled timeout exceptions when connecting to quiet or bannerless remote endpoints.
+* **Comprehensive Test Coverage**:
+  * Added unit tests for URL normalization, raw TCP network serial bridges, RFC 2217 negotiation fallback, raw socket break rejection, and custom newline handling (45 passing tests).
 
 ### Version 0.6.1
 * **Fixed the default `prompt_pattern` for real-world OpenVMS use**: the
@@ -100,15 +119,15 @@ The server exposes 16 MCP tools across Telnet, Serial, and Visual Terminal categ
 | `terminal_get_screen` | Visual | Inspects the rendered 2D terminal canvas, cursor position, and highlighted reverse-video text. | `session_id`, `wait_seconds` |
 | `terminal_send_key` | Visual | Sends named keyboard keys or VT escape sequences (e.g. `UP`, `DOWN`, `TAB`, `ENTER`, `ESC`, `CTRL_Z`) and returns the updated screen. | `session_id`, `key`, `wait_seconds` |
 | `terminal_resize` | Visual | Dynamically resizes the virtual terminal canvas and sends RFC 1073 Telnet NAWS window resize negotiation. | `session_id`, `cols`, `rows` |
-| `telnet_client` | Telnet | Connects or sends command sequences via Telnet with prompt waiting and session logging. | `host`, `port`, `commands`, `telnet_session_id`, `prompt_pattern`, `max_wait_seconds` |
+| `telnet_client` | Telnet | Connects or sends command sequences via Telnet with prompt waiting and session logging. | `host`, `port`, `commands`, `telnet_session_id`, `prompt_pattern`, `newline`, `max_wait_seconds` |
 | `telnet_read_session` | Telnet | Non-blocking read/polling of the background stream buffer for an active Telnet session. | `session_id`, `prompt_pattern`, `max_wait_seconds`, `idle_timeout` |
-| `telnet_send_input` | Telnet | Sends interactive input or raw keystrokes to an active Telnet session. | `session_id`, `input_text`, `raw`, `max_wait_seconds`, `prompt_pattern` |
+| `telnet_send_input` | Telnet | Sends interactive input or raw keystrokes to an active Telnet session. | `session_id`, `input_text`, `raw`, `newline`, `max_wait_seconds`, `prompt_pattern` |
 | `telnet_close_session` | Telnet | Explicitly closes an active Telnet session and finalizes log files. | `session_id` |
-| `serial_client` | Serial | Connects or sends command sequences over a serial port with timeout immunity and session logging. | `port`, `commands`, `baudrate`, `bytesize`, `parity`, `stopbits`, `serial_session_id`, `max_wait_seconds` |
+| `serial_client` | Serial | Connects or sends command sequences over a local serial port or network serial bridge (`rfc2217://`, `socket://`) with timeout immunity and session logging. | `port`, `commands`, `baudrate`, `bytesize`, `parity`, `stopbits`, `newline`, `serial_session_id`, `max_wait_seconds` |
 | `serial_read_session` | Serial | Non-blocking read/polling of the background stream buffer for an active serial session. | `session_id`, `prompt_pattern`, `max_wait_seconds`, `idle_timeout` |
-| `serial_send_input` | Serial | Sends interactive input, passwords, or raw keystrokes to an active serial session. | `session_id`, `input_text`, `raw`, `max_wait_seconds`, `prompt_pattern` |
+| `serial_send_input` | Serial | Sends interactive input, passwords, or raw keystrokes to an active serial session. | `session_id`, `input_text`, `raw`, `newline`, `max_wait_seconds`, `prompt_pattern` |
 | `serial_set_speed` | Serial | Dynamically reconfigures baud rate and framing on an active serial session without reconnecting. | `session_id`, `baudrate`, `bytesize`, `parity`, `stopbits` |
-| `serial_send_break` | Serial | Sends an RS-232 hardware Break condition (~250ms) to halt a running system into console mode (`>>>`). | `session_id`, `duration`, `prompt_pattern`, `max_wait_seconds` |
+| `serial_send_break` | Serial | Sends an RS-232 hardware Break condition (~250ms) locally or over RFC 2217 to halt a running system into console mode (`>>>`). | `session_id`, `duration`, `prompt_pattern`, `max_wait_seconds` |
 | `serial_list_ports` | Serial | Enumerates available hardware serial and USB-UART ports on the host system. | *(None)* |
 | `serial_close_session` | Serial | Explicitly closes an active serial session and finalizes log files. | `session_id` |
 | `list_sessions` | Unified | Lists all active terminal sessions (both Telnet and Serial) with protocol and byte statistics. | *(None)* |
@@ -175,6 +194,71 @@ await terminal_resize(session_id="vms_session", cols=132, rows=50)
 
 ---
 
+## Configuring `ser2net` for MCP Terminal Access
+
+When serial ports on managed systems (such as VAX consoles) are connected to a remote Linux gateway server rather than the local workstation running the MCP client, `ser2net` provides serial-to-network bridging.
+
+### Accepter Modes: RFC 2217 vs Raw TCP
+
+`ser2net` supports two accepter modes for incoming TCP connections:
+
+1. **RFC 2217 Mode (`accepter: telnet(rfc2217),tcp,<bind_ip>,<port>`) — STRONGLY RECOMMENDED**:
+   * Enables Telnet option negotiation (RFC 2217 Telnet Com Port Control Option).
+   * Telnet CLI clients automatically negotiate character-at-a-time mode and binary transmission, eliminating the need to manually switch modes via `Control-]` / `mode character` / `set binary`.
+   * **Hardware BREAK Support**: Allows `serial_send_break` to transmit true RS-232 Break spacing across the network to halt remote VAX systems into console firmware (`>>>`).
+   * Allows dynamic baud rate and framing adjustments across the network.
+2. **Raw TCP Mode (`accepter: tcp,<bind_ip>,<port>`)**:
+   * Raw byte pass-through.
+   * Does NOT support RS-232 BREAK signalling (pyserial silently ignores `send_break()` on raw sockets).
+   * Telnet CLI clients default to line-mode and local echo, requiring manual mode switching.
+
+### Example `/etc/ser2net/ser2net.yaml` Configuration
+
+```yaml
+%YAML 1.1
+---
+define: &confver 1.0
+
+default:
+  name: local
+  value: true
+  class: serialdev
+
+connection: &vax4000_60
+  accepter: telnet(rfc2217),tcp,127.0.0.1,7001
+  connector: serialdev,/dev/vax_4000_60,9600n81,local
+  enable: on
+  options:
+    kickolduser: true
+
+connection: &vax4000_96
+  accepter: telnet(rfc2217),tcp,127.0.0.1,7004
+  connector: serialdev,/dev/vax_4000_96,9600n81,local
+  enable: on
+  options:
+    kickolduser: true
+```
+
+### Connecting to `ser2net` with MCP Tools
+
+* **Target URL**: Pass `rfc2217://host:port` or simply `host:port` (which automatically defaults to RFC 2217):
+  ```python
+  # Connect to VAX60 console via ser2net
+  res = await serial_client(
+      port="rfc2217://127.0.0.1:7001",  # or "127.0.0.1:7001"
+      commands=["SHOW SYSTEM"],
+      newline="\r",                     # Use bare \r for OpenVMS console
+  )
+  ```
+* **Sending BREAK**:
+  ```python
+  # Halts running VAX CPU into console firmware >>>
+  break_res = await serial_send_break(session_id="...")
+  ```
+* **OpenVMS Serial Console Line Terminator Note**: OpenVMS serial consoles (`_OPA0:`) consume `\r` (carriage return) as command execution and `\n` (newline) as an immediate subsequent empty input line. Always specify `newline="\r"` when interacting with VMS serial consoles to prevent premature empty password submission or login errors.
+
+---
+
 ## Installation & Deployment
 
 ### Recommended: With `pipx` under Python 3.11 / 3.12
@@ -201,8 +285,8 @@ uv pip install -e .
 ## Running the Automated Test Suite
 
 ```bash
-# Run the complete test suite (all 18 unit and integration tests):
-pytest tests/test_screen_emulator.py tests/test_standalone_telnet.py tests/test_standalone_serial.py
+# Run the complete test suite (all 45 unit and integration tests):
+VAX_LONG_TEST_DURATION=3 pytest tests/
 ```
 
 ---
@@ -210,7 +294,7 @@ pytest tests/test_screen_emulator.py tests/test_standalone_telnet.py tests/test_
 ## Authors & Attribution
 
 * **Original Author & Project**: Created by the **Chuk MCP Team** as part of the Chuk Model Context Protocol server suite ([chuk-mcp-telnet-client on PyPI](https://pypi.org/project/chuk-mcp-telnet-client/)).
-* **Enhanced & Maintained by**: **Douglas P. Fields, Jr.** (`symbolics@lisp.engineer`) — Extended into unified Terminal MCP Server (v0.5.0, v0.5.1, v0.6.0) with DEC VT terminal screen emulation (`pyte`), Unicode line-drawing conversion, reverse-video attribute detection, RFC 1073 NAWS dynamic resizing, automated VT inquiry response, USB-Serial console integration, dynamic baud rate switching, hardware RS-232 BREAK signalling, single-file persistent transcript logging, and timeout-proof multi-session polling.
+* **Enhanced & Maintained by**: **Douglas P. Fields, Jr.** (`symbolics@lisp.engineer`) — Extended into unified Terminal MCP Server (v0.5.0, v0.5.1, v0.6.0, v0.7.0) with RFC 2217 network serial support, network RS-232 BREAK signalling, configurable newline terminators, DEC VT terminal screen emulation (`pyte`), Unicode line-drawing conversion, reverse-video attribute detection, RFC 1073 NAWS dynamic resizing, automated VT inquiry response, USB-Serial console integration, dynamic baud rate switching, single-file persistent transcript logging, and timeout-proof multi-session polling.
   * With Gemini Flash (3.6, 3.7, 3.8) via Antigravity CLI
 
 ---

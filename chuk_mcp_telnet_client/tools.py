@@ -276,7 +276,8 @@ async def _background_serial_reader_loop(session: SerialSession) -> None:
         while session.is_active:
             try:
                 # Read available bytes without long blocking
-                to_read = max(1, session.serial.in_waiting or 1)
+                in_wait = getattr(session.serial, "in_waiting", 0)
+                to_read = max(1, in_wait or 1)
                 data = await asyncio.to_thread(session.serial.read, to_read)
             except (serial.SerialException, OSError) as e:
                 logger.info(f"Serial port closed/disconnected for session {session.session_id}: {e}")
@@ -431,12 +432,37 @@ async def _connect_telnet(host: str, port: int) -> tuple[telnetlib.Telnet, str]:
         raise RuntimeError(f"Failed to connect to Telnet server at {host}:{port}: {ex}")
 
     await asyncio.sleep(TerminalDefaults.INITIAL_BANNER_WAIT)
-    initial_data = await asyncio.to_thread(tn.read_very_eager)
-    if not initial_data:
-        initial_data = await asyncio.to_thread(tn.read_some)
+    initial_data = b""
+    try:
+        initial_data = await asyncio.to_thread(tn.read_very_eager)
+        if not initial_data:
+            try:
+                initial_data = await asyncio.wait_for(
+                    asyncio.to_thread(tn.read_some),
+                    timeout=TerminalDefaults.RESPONSE_WAIT,
+                )
+            except (asyncio.TimeoutError, TimeoutError, OSError):
+                initial_data = b""
+    except Exception as e:
+        logger.debug(f"Initial banner read failed or timed out: {e}")
+        initial_data = b""
 
     initial_banner = initial_data.decode("utf-8", errors="ignore")
     return tn, initial_banner
+
+
+def _normalize_serial_target(port: str) -> str:
+    """Normalize a serial port path or network address to a pyserial URL or device path."""
+    port_stripped = port.strip()
+    if "://" in port_stripped:
+        return port_stripped
+    # Check for host:port format (IPv4, hostname, or bracketed IPv6 with port)
+    # Exclude filesystem device paths like /dev/... or Windows paths like C:\... or COM1
+    if not port_stripped.startswith("/") and not port_stripped.startswith("\\"):
+        match = re.match(r"^(\[[0-9a-fA-F:]+\]|[a-zA-Z0-9.\-_]+):(\d+)$", port_stripped)
+        if match:
+            return f"rfc2217://{port_stripped}"
+    return port_stripped
 
 
 async def _connect_serial(
@@ -449,7 +475,7 @@ async def _connect_serial(
     xonxoff: bool = False,
     response_wait: float = 1.0,
 ) -> tuple[serial.Serial, str]:
-    """Establish a new serial connection."""
+    """Establish a new serial connection (local hardware or network-bridged RFC 2217 / raw socket)."""
     parity_map = {
         "N": serial.PARITY_NONE,
         "E": serial.PARITY_EVEN,
@@ -471,26 +497,45 @@ async def _connect_serial(
         8: serial.EIGHTBITS,
     }
 
-    try:
-        ser = await asyncio.to_thread(
-            serial.Serial,
-            port=port,
-            baudrate=baudrate,
-            bytesize=bytesize_map.get(bytesize, serial.EIGHTBITS),
-            parity=parity_map.get(parity.upper(), serial.PARITY_NONE),
-            stopbits=stopbits_map.get(stopbits, serial.STOPBITS_ONE),
-            timeout=0.1,
-            rtscts=rtscts,
-            xonxoff=xonxoff,
-        )
-    except Exception as ex:
-        raise RuntimeError(f"Failed to open serial port at {port} ({baudrate} baud): {ex}")
+    normalized_port = _normalize_serial_target(port)
+    target_urls = [normalized_port]
+    # If auto-prefixed with rfc2217:// (i.e. user passed host:port without scheme),
+    # prepare socket:// as fallback in case the remote endpoint is a raw TCP socket without RFC 2217
+    if normalized_port.startswith("rfc2217://") and "://" not in port:
+        target_urls.append(f"socket://{port.strip()}")
+
+    ser = None
+    last_ex = None
+    for target in target_urls:
+        try:
+            ser = await asyncio.to_thread(
+                serial.serial_for_url,
+                url=target,
+                baudrate=baudrate,
+                bytesize=bytesize_map.get(bytesize, serial.EIGHTBITS),
+                parity=parity_map.get(parity.upper(), serial.PARITY_NONE),
+                stopbits=stopbits_map.get(stopbits, serial.STOPBITS_ONE),
+                timeout=0.1,
+                rtscts=rtscts,
+                xonxoff=xonxoff,
+            )
+            break
+        except Exception as ex:
+            last_ex = ex
+            if len(target_urls) > 1 and target == target_urls[0] and "RFC2217" in str(ex):
+                logger.info(f"RFC 2217 negotiation failed for {target}, attempting raw socket fallback: {ex}")
+                continue
+            raise RuntimeError(f"Failed to open serial port at {port} ({baudrate} baud): {ex}")
+
+    if ser is None and last_ex:
+        raise RuntimeError(f"Failed to open serial port at {port} ({baudrate} baud): {last_ex}")
 
     await asyncio.sleep(response_wait)
     initial_bytes = b""
     try:
-        if ser.in_waiting:
-            initial_bytes = await asyncio.to_thread(ser.read, ser.in_waiting)
+        in_wait = getattr(ser, "in_waiting", 0)
+        if in_wait:
+            initial_bytes = await asyncio.to_thread(ser.read, in_wait)
     except Exception:
         pass
 
@@ -582,6 +627,7 @@ async def telnet_client_tool(
     response_wait: float = TerminalDefaults.RESPONSE_WAIT,
     max_wait_seconds: float = TerminalDefaults.MAX_WAIT_SECONDS,
     prompt_pattern: str = TerminalDefaults.PROMPT_PATTERN,
+    newline: str = "\r\n",
     log_dir: Optional[str] = None,
     enable_logging: bool = True,
     timestamp_chunks: bool = False,
@@ -641,7 +687,7 @@ async def telnet_client_tool(
             cmd_start_index = len(session.accumulated_output)
             session.current_cmd_start_index = cmd_start_index
 
-        cmd_bytes = (cmd + "\r\n").encode("utf-8")
+        cmd_bytes = (cmd + newline).encode("utf-8")
         try:
             await asyncio.to_thread(session.telnet.write, cmd_bytes)
         except Exception as e:
@@ -739,6 +785,7 @@ async def telnet_send_input(
     session_id: str,
     input_text: str,
     raw: bool = False,
+    newline: str = "\r\n",
     max_wait_seconds: float = 5.0,
     prompt_pattern: Optional[str] = None,
 ) -> TelnetSendInputOutput:
@@ -751,7 +798,7 @@ async def telnet_send_input(
         start_index = len(session.accumulated_output)
         session.current_cmd_start_index = start_index
 
-    payload = input_text.encode("utf-8") if raw else (input_text + "\r\n").encode("utf-8")
+    payload = input_text.encode("utf-8") if raw else (input_text + newline).encode("utf-8")
     await asyncio.to_thread(session.telnet.write, payload)
 
     if session.logger:
@@ -808,6 +855,7 @@ async def serial_client_tool(
     response_wait: float = TerminalDefaults.RESPONSE_WAIT,
     max_wait_seconds: float = TerminalDefaults.MAX_WAIT_SECONDS,
     prompt_pattern: str = TerminalDefaults.PROMPT_PATTERN,
+    newline: str = "\r\n",
     log_dir: Optional[str] = None,
     enable_logging: bool = True,
     timestamp_chunks: bool = False,
@@ -869,7 +917,7 @@ async def serial_client_tool(
             cmd_start_index = len(session.accumulated_output)
             session.current_cmd_start_index = cmd_start_index
 
-        cmd_bytes = (cmd + "\r\n").encode("utf-8")
+        cmd_bytes = (cmd + newline).encode("utf-8")
         try:
             await asyncio.to_thread(session.serial.write, cmd_bytes)
             await asyncio.to_thread(session.serial.flush)
@@ -968,6 +1016,7 @@ async def serial_send_input(
     session_id: str,
     input_text: str,
     raw: bool = False,
+    newline: str = "\r\n",
     max_wait_seconds: float = 5.0,
     prompt_pattern: Optional[str] = None,
 ) -> SerialSendInputOutput:
@@ -980,7 +1029,7 @@ async def serial_send_input(
         start_index = len(session.accumulated_output)
         session.current_cmd_start_index = start_index
 
-    payload = input_text.encode("utf-8") if raw else (input_text + "\r\n").encode("utf-8")
+    payload = input_text.encode("utf-8") if raw else (input_text + newline).encode("utf-8")
     await asyncio.to_thread(session.serial.write, payload)
     await asyncio.to_thread(session.serial.flush)
 
@@ -1018,6 +1067,21 @@ async def serial_send_break(
     session = await _session_store.get(session_id)
     if session is None or not isinstance(session, SerialSession):
         raise ValueError(f"No active Serial session found with ID '{session_id}'")
+
+    # Raw socket:// does not support RS-232 BREAK over TCP
+    if session.port.startswith("socket://"):
+        return SerialSendBreakOutput(
+            session_id=session_id,
+            success=False,
+            prompt_matched=None,
+            output="",
+            message=(
+                "Failed sending break condition: session is connected via raw TCP socket ('socket://'). "
+                "Raw TCP sockets cannot transmit RS-232 BREAK signals across the network. "
+                "To send BREAK over the network, enable RFC 2217 on ser2net ('accepter: telnet(rfc2217)...') "
+                "and connect using 'rfc2217://host:port'."
+            ),
+        )
 
     async with session.lock:
         start_index = len(session.accumulated_output)

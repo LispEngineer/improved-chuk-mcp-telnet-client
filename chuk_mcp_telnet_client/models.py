@@ -12,6 +12,7 @@ class TelnetClientInput(BaseModel):
     host: str = Field(..., description="Host or IP address of the Telnet server.")
     port: int = Field(..., description="Port on which the Telnet server is listening.")
     commands: List[str] = Field(..., description="Commands to send sequentially.")
+    newline: str = Field("\r\n", description="Line terminator to append to commands (default: '\\r\\n').")
 
 
 class CommandResponse(BaseModel):
@@ -20,7 +21,7 @@ class CommandResponse(BaseModel):
 
 
 class TelnetClientOutput(BaseModel):
-    server_version: str = "0.6.1"
+    server_version: str = "0.7.0"
     host: str
     port: int
     initial_banner: str
@@ -61,7 +62,7 @@ class TelnetSendInputOutput(BaseModel):
 
 
 class SerialClientInput(BaseModel):
-    port: str = Field(..., description="Serial port device path (e.g. /dev/ttyUSB0).")
+    port: str = Field(..., description="Serial port device path (e.g. /dev/ttyUSB0) or network URL (rfc2217://host:port, socket://host:port, or host:port).")
     commands: List[str] = Field(..., description="Commands to send sequentially.")
     baudrate: int = Field(9600, description="Serial baud rate (default: 9600).")
     bytesize: int = Field(8, description="Data bit size (default: 8).")
@@ -69,10 +70,11 @@ class SerialClientInput(BaseModel):
     stopbits: float = Field(1.0, description="Stop bits: 1, 1.5, or 2 (default: 1.0).")
     rtscts: bool = Field(False, description="Enable hardware RTS/CTS flow control.")
     xonxoff: bool = Field(False, description="Enable software XON/XOFF flow control.")
+    newline: str = Field("\r\n", description="Line terminator to append to commands (default: '\\r\\n', use '\\r' for VMS serial console).")
 
 
 class SerialClientOutput(BaseModel):
-    server_version: str = "0.6.1"
+    server_version: str = "0.7.0"
     port: str
     baudrate: int
     initial_banner: str
@@ -154,13 +156,13 @@ class SessionInfo(BaseModel):
     age_seconds: float
     is_active: bool
     total_bytes_received: int
-    server_version: str = "0.6.1"
+    server_version: str = "0.7.0"
 
 
 class SessionListResponse(BaseModel):
     """Response for listing all active sessions."""
 
-    server_version: str = "0.6.1"
+    server_version: str = "0.7.0"
     active_sessions: int
     sessions: Dict[str, SessionInfo]
     note: str = (
@@ -193,7 +195,7 @@ class TerminalScreenOutput(BaseModel):
     screen_text: str
     annotated_text: str
     highlighted_lines: List[int]
-    server_version: str = "0.6.1"
+    server_version: str = "0.7.0"
 
 
 class TerminalSendKeyOutput(BaseModel):
@@ -209,7 +211,7 @@ class TerminalSendKeyOutput(BaseModel):
     cursor_row: Optional[int] = None
     cursor_col: Optional[int] = None
     cursor_visible: Optional[bool] = None
-    server_version: str = "0.6.1"
+    server_version: str = "0.7.0"
 
 
 class TerminalResizeOutput(BaseModel):
@@ -221,5 +223,5 @@ class TerminalResizeOutput(BaseModel):
     naws_sent: bool
     success: bool
     message: str
-    server_version: str = "0.6.1"
+    server_version: str = "0.7.0"
 
