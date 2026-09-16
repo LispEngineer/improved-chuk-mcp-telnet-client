@@ -239,6 +239,53 @@ connection: &vax4000_96
     kickolduser: true
 ```
 
+### Deterministic Serial Device Naming via Udev Rules
+
+When multiple USB-to-UART serial adapters are connected to a Linux server, default kernel device node assignments (`/dev/ttyUSB0`, `/dev/ttyUSB1`, etc.) are non-deterministic and can shuffle across reboots, kernel updates, or USB re-plugs. If `ser2net.yaml` were configured with raw `/dev/ttyUSB*` paths, a reboot could silently swap console assignments across machines.
+
+To ensure permanent, deterministic device nodes, configure udev rules mapping each adapter's unique USB serial number to a descriptive symlink:
+
+1. **Add User to Serial Access Group**:
+   Depending on the Linux distribution, serial ports are owned by group `uucp` (Arch, RedHat, Fedora) or `dialout` (Debian, Ubuntu):
+   ```bash
+   # Add your user to the appropriate group (e.g. uucp or dialout)
+   sudo usermod -aG uucp $USER   # or: sudo usermod -aG dialout $USER
+   ```
+
+2. **Discover Adapter Attributes**:
+   Query the physical adapter's unique serial number and USB vendor/product IDs:
+   ```bash
+   udevadm info -a -n /dev/ttyUSB0 | grep -E '(ATTRS{serial}|ATTRS{idVendor}|ATTRS{idProduct})'
+   ```
+   *Example output:*
+   ```text
+   ATTRS{idProduct}=="6001"
+   ATTRS{idVendor}=="0403"
+   ATTRS{serial}=="A9QEPKOR"
+   ```
+
+3. **Create Static Udev Rules (`/etc/udev/rules.d/99-vax-consoles.rules`)**:
+   Create symlinks with group permissions (`0660`):
+   ```udev
+   # VAXstation 4000/60 Console
+   SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6001", ATTRS{serial}=="A9QEPKOR", SYMLINK+="vax_4000_60", GROUP="uucp", MODE="0660"
+
+   # VAXstation 4000/96 Console
+   SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6001", ATTRS{serial}=="A95RTMFR", SYMLINK+="vax_4000_96", GROUP="uucp", MODE="0660"
+   ```
+
+4. **Reload and Trigger Udev**:
+   ```bash
+   sudo udevadm control --reload-rules && sudo udevadm trigger
+   ```
+   This immediately instantiates persistent symlinks at `/dev/vax_4000_60` and `/dev/vax_4000_96` that survive reboots and USB reconnections.
+
+5. **Reference in `ser2net.yaml`**:
+   The static device symlinks are then referenced directly in the `ser2net` connection definitions (as shown above):
+   ```yaml
+   connector: serialdev,/dev/vax_4000_60,9600n81,local
+   ```
+
 ### Connecting to `ser2net` with MCP Tools
 
 * **Target URL**: Pass `rfc2217://host:port` or simply `host:port` (which automatically defaults to RFC 2217):
