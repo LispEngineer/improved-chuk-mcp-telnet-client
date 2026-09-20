@@ -2,6 +2,14 @@
 
 A unified **Model Context Protocol (MCP)** Terminal Communications Server designed for AI coding assistants and automation agents. Supports both **Telnet** (networked hosts) and **USB-Serial / UART** (hardware console ports) concurrently with asynchronous background stream buffering, non-blocking polling, interactive sessions, dynamic speed switching, hardware Break signalling, in-memory DEC VT terminal screen emulation, and clean, human-readable disk logging.
 
+> **Requires Python 3.11 or 3.12 — NOT 3.13+.** The stdlib `telnetlib` this
+> package imports was removed in 3.13 (PEP 594). On a rolling distro such as
+> Arch, the system interpreter is already too new, and installing under it
+> produces a server that registers cleanly and then fails at first use with
+> `ModuleNotFoundError: No module named 'telnetlib'`. Having `telnetlib3`
+> installed does **not** change this. See
+> [Installation & Deployment](#installation--deployment).
+
 ---
 
 ## Highlights & Features
@@ -308,24 +316,105 @@ To ensure permanent, deterministic device nodes, configure udev rules mapping ea
 
 ## Installation & Deployment
 
-### Recommended: With `pipx` under Python 3.11 / 3.12
+### REQUIREMENT: Python 3.11 or 3.12. Not 3.13 or newer.
 
-```bash
-# Install in editable mode from source repository
-pipx install --python python3.12 -e /home/dfields/src/chuk-mcp-telnet-client
+This is a hard requirement, not a preference. `pyproject.toml` enforces it
+(`requires-python = ">=3.11, <3.13"`), so `pip`/`uv`/`pipx` will refuse to
+install under a newer interpreter.
 
-# Verify available commands
-mcp-terminal-client --help
-mcp-telnet-client --help
+**Why:** `chuk_mcp_telnet_client/tools.py` imports the **standard library**
+`telnetlib`, which [PEP 594](https://peps.python.org/pep-0594/) removed from
+CPython in **3.13**. Under 3.13+ the import fails before any of this package's
+code runs:
+
+```
+ModuleNotFoundError: No module named 'telnetlib'
 ```
 
-### In Development Virtual Environment
+**A point that has already caused confusion, twice:** this package also depends
+on **`telnetlib3`** from PyPI (see `pyproject.toml`). Those are two different
+things. `telnetlib3` being installed does **not** satisfy the stdlib
+`telnetlib` import in `tools.py`, so reading the dependency list and concluding
+"3.13+ is fine now" is wrong. Check the import, not the dependency list.
+
+The failure is quiet in the worst way: the MCP server installs cleanly, the
+host registers it, and everything dies at first use rather than at install
+time.
+
+### Getting a Python 3.12 on Arch Linux (and other rolling distros)
+
+Arch ships only the current CPython — on the reference host that is
+**3.14.7**, and `/usr/bin/python3.12` does not exist. There is **no `python312`
+package in the official repositories** (only in the AUR). So do not expect the
+system interpreter to work, and do not fight `pacman` for an old one.
+
+The approach used on the reference hosts is to let **`uv` supply the
+interpreter**. `uv` downloads and manages standalone CPython builds under
+`~/.local/share/uv/python/`, entirely separate from the system Python:
 
 ```bash
+# One time: fetch a managed 3.12 (no root, no AUR, no effect on system python)
+uv python install 3.12
+```
+
+Everything below then works regardless of what `/usr/bin/python3` happens to be.
+
+### Option A — `uv tool install` (recommended for MCP server use)
+
+Installs the entry points onto your `PATH` in an isolated environment, pinned
+to 3.12:
+
+```bash
+uv tool install --python 3.12 --editable /path/to/chuk-mcp-telnet-client
+
+mcp-telnet-client --help
+mcp-terminal-client --help
+```
+
+This is the right choice when the package is being consumed as an MCP server
+(i.e. the host launches `mcp-telnet-client` by name).
+
+### Option B — project virtual environment
+
+Right when the package is vendored into another project (e.g. as a git
+submodule) and that project's own scripts import it directly:
+
+```bash
+cd /path/to/chuk-mcp-telnet-client
 uv venv --python 3.12
 source .venv/bin/activate
 uv pip install -e .
 ```
+
+Consumers that must not depend on the shell's active environment can invoke the
+interpreter by absolute path instead of activating:
+
+```bash
+/path/to/chuk-mcp-telnet-client/.venv/bin/python3 your_script.py
+```
+
+### Option C — `pipx`
+
+```bash
+pipx install --python python3.12 --editable /path/to/chuk-mcp-telnet-client
+```
+
+Note this requires a `python3.12` that `pipx` can find on `PATH`, which on Arch
+means you have already provided one (see above). `uv tool install` avoids that
+extra step and is preferred.
+
+### Verifying you got it right
+
+Confirm the interpreter actually behind the installed entry point, rather than
+assuming:
+
+```bash
+python3 -c "import telnetlib; print('stdlib telnetlib OK')"
+```
+
+Run that with the *same* interpreter the server will use. If it raises
+`ModuleNotFoundError`, the environment is on 3.13+ and the server will fail at
+first use no matter how cleanly it installed.
 
 ---
 
