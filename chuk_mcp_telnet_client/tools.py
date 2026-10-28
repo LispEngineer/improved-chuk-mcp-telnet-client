@@ -9,7 +9,10 @@ clean transcript disk logging without overwriting, and polymorphic multi-session
 import asyncio
 import logging
 import re
+import select
+import socket
 import telnetlib  # nosec B401 - telnet is part of this MCP server
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -41,6 +44,7 @@ from chuk_mcp_telnet_client.models import (
     TerminalResizeOutput,
     TerminalScreenOutput,
     TerminalSendKeyOutput,
+    TerminalWaitForChangeOutput,
 )
 
 logger = logging.getLogger(__name__)
@@ -70,6 +74,18 @@ class TerminalDefaults:
     RESPONSE_WAIT: float = 1.0
     READ_TIMEOUT: int = 5
     MAX_WAIT_SECONDS: float = 20.0
+    # Session reader threads (v0.7.1). The reader blocks for at most READER_POLL_SECONDS
+    # at a time, so a stop request is seen within that; after data first arrives it waits
+    # READER_COALESCE_SECONDS so a burst becomes one chunk (the 0.7.0 asyncio loop slept
+    # 20 ms between reads, which gave the same chunk size); close joins the thread for at
+    # most READER_JOIN_SECONDS.
+    READER_POLL_SECONDS: float = 0.1
+    READER_COALESCE_SECONDS: float = 0.02
+    READER_JOIN_SECONDS: float = 2.0
+    # terminal_wait_for_change: the longest a single call may wait, so a call cannot hang
+    # a client for ever, and how often it looks at the (always current) session state.
+    WAIT_FOR_CHANGE_MAX_TIMEOUT: float = 300.0
+    WAIT_FOR_CHANGE_POLL_SECONDS: float = 0.02
     # Matches, in order:
     #   1. (?m:^\$ )            - a bare "$ " DCL prompt at the start of any line
     #                             (stock, uncustomized OpenVMS SYLOGIN.COM).
@@ -130,13 +146,24 @@ class TelnetSession:
     is_active: bool = True
     last_activity: float = field(default_factory=time.time)
     current_cmd_start_index: int = 0
-    reader_task: Optional[asyncio.Task] = None
-    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # The reader runs in its own daemon thread (see _telnet_reader_thread), so the
+    # socket is read when bytes arrive, not only while a tool call is being served.
+    reader_thread: Optional[threading.Thread] = None
+    stop_event: threading.Event = field(default_factory=threading.Event)
+    # lock: the session's state (buffers, pyte screen, counters). write_lock: the
+    # transport's output, so writers never interleave. Never held together.
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    write_lock: threading.Lock = field(default_factory=threading.Lock)
     total_bytes_received: int = 0
     cols: int = 80
     rows: int = 24
     screen: Optional[pyte.Screen] = None
     stream: Optional[pyte.Stream] = None
+    # For terminal_wait_for_change: screen_seq counts chunks fed to pyte; last_rx_monotonic
+    # is when the last one was fed; last_read_sig is the screen last returned to a client.
+    screen_seq: int = 0
+    last_rx_monotonic: float = field(default_factory=time.monotonic)
+    last_read_sig: Optional[tuple] = None
 
     def __post_init__(self):
         if self.screen is None:
@@ -177,13 +204,24 @@ class SerialSession:
     is_active: bool = True
     last_activity: float = field(default_factory=time.time)
     current_cmd_start_index: int = 0
-    reader_task: Optional[asyncio.Task] = None
-    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # The reader runs in its own daemon thread (see _telnet_reader_thread), so the
+    # socket is read when bytes arrive, not only while a tool call is being served.
+    reader_thread: Optional[threading.Thread] = None
+    stop_event: threading.Event = field(default_factory=threading.Event)
+    # lock: the session's state (buffers, pyte screen, counters). write_lock: the
+    # transport's output, so writers never interleave. Never held together.
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    write_lock: threading.Lock = field(default_factory=threading.Lock)
     total_bytes_received: int = 0
     cols: int = 80
     rows: int = 24
     screen: Optional[pyte.Screen] = None
     stream: Optional[pyte.Stream] = None
+    # For terminal_wait_for_change: screen_seq counts chunks fed to pyte; last_rx_monotonic
+    # is when the last one was fed; last_read_sig is the screen last returned to a client.
+    screen_seq: int = 0
+    last_rx_monotonic: float = field(default_factory=time.monotonic)
+    last_read_sig: Optional[tuple] = None
 
     def __post_init__(self):
         if self.screen is None:
@@ -208,127 +246,206 @@ class SerialSession:
 
 
 # ============================================================================
-# Background Reader Loops
+# Background Reader Threads
 # ============================================================================
+#
+# Why threads (v0.7.1): in stdio mode chuk_mcp_server's StdioSyncTransport blocks in
+# sys.stdin.readline() between requests and runs the asyncio loop only while it serves
+# one. The 0.7.0 readers were asyncio tasks on that loop, so between tool calls nothing
+# read the socket or port: a wait-0 terminal_get_screen showed the screen as of the last
+# call, and the transcript stamped a chunk when it was read rather than when it arrived.
+# A daemon thread per session reads all the time, whatever the transport does.
+#
+# Locking: session.lock guards the session's state (buffers, pyte screen, counters);
+# session.write_lock serialises writes to the transport. No code holds both at once.
 
 
-async def _background_telnet_reader_loop(session: TelnetSession) -> None:
-    """Continuously reads raw bytes from telnet socket in background and buffers them."""
-    try:
-        while session.is_active:
+def _write_transport(
+    session: Union["TelnetSession", "SerialSession"],
+    payload: bytes,
+    flush: bool = False,
+) -> None:
+    """Write bytes to the session's socket or port under its write lock (blocking)."""
+    with session.write_lock:
+        if isinstance(session, TelnetSession):
+            session.telnet.write(payload)
+        else:
+            session.serial.write(payload)
+            if flush:
+                session.serial.flush()
+
+
+def _answer_vt_queries(session: Union["TelnetSession", "SerialSession"], data: bytes) -> None:
+    """Automatic DEC VT terminal query handling: answer DA, CPR and DSR."""
+    replies = []
+    if b"\x1b[c" in data or b"\x1b[0c" in data or b"\x1bZ" in data:
+        replies.append(("DA", b"\x1b[?62;1;2;6;7;8;9c"))
+    if b"\x1b[6n" in data:
+        replies.append(("CPR", f"\x1b[{session.rows};{session.cols}R".encode("utf-8")))
+    if b"\x1b[5n" in data:
+        replies.append(("DSR", b"\x1b[0n"))
+    for name, reply in replies:
+        try:
+            _write_transport(session, reply)
+        except Exception as e:
+            logger.warning(f"Failed to respond to VT {name} query: {e}")
+
+
+def _ingest_chunk(
+    session: Union["TelnetSession", "SerialSession"],
+    data: bytes,
+    arrived_at: float,
+) -> None:
+    """Append a received chunk to the buffers, feed pyte, and log it stamped on arrival."""
+    text = data.decode("utf-8", errors="ignore")
+    with session.lock:
+        session.accumulated_output += text
+        session.unconsumed_output += text
+        session.total_bytes_received += len(data)
+        session.last_activity = time.time()
+        session.last_rx_monotonic = time.monotonic()
+        session.screen_seq += 1
+        if session.stream:
             try:
-                data = await asyncio.to_thread(session.telnet.read_very_eager)
-            except (OSError, EOFError):
+                session.stream.feed(text)
+            except Exception as e:
+                logger.warning(f"Error feeding {session.session_type} text to pyte stream: {e}")
+
+    if session.logger:
+        session.logger.log_stream_chunk(
+            session_id=session.session_id,
+            chunk=text,
+            at=arrived_at,
+        )
+
+
+def _telnet_reader_thread(session: "TelnetSession") -> None:
+    """Read the telnet socket whenever bytes arrive, until EOF or a stop request."""
+    try:
+        sock = session.telnet.get_socket()
+        while not session.stop_event.is_set():
+            try:
+                # Wakes on data, on EOF, and on the shutdown() a close does.
+                readable, _, _ = select.select([sock], [], [], TerminalDefaults.READER_POLL_SECONDS)
+            except (OSError, ValueError):
+                break  # the socket was closed under us
+            if not readable:
+                continue
+            arrived_at = time.time()
+            if session.stop_event.wait(TerminalDefaults.READER_COALESCE_SECONDS):
+                break
+            try:
+                # read_very_eager() does not block. telnetlib answers option negotiation
+                # with its own sendall() inside it, hence the write lock.
+                with session.write_lock:
+                    data = session.telnet.read_very_eager()
+            except (OSError, EOFError, AttributeError):
                 logger.info(f"Telnet connection closed for session {session.session_id}")
-                session.is_active = False
                 break
-            except Exception as e:
-                logger.warning(f"Error reading socket in session {session.session_id}: {e}")
-                await asyncio.sleep(0.05)
-                continue
-
             if data:
-                # Automatic DEC VT terminal query handling
-                if b"\x1b[c" in data or b"\x1b[0c" in data or b"\x1bZ" in data:
-                    try:
-                        session.telnet.write(b"\x1b[?62;1;2;6;7;8;9c")
-                    except Exception as e:
-                        logger.warning(f"Failed to respond to VT DA query: {e}")
-                if b"\x1b[6n" in data:
-                    try:
-                        cpr_reply = f"\x1b[{session.rows};{session.cols}R".encode("utf-8")
-                        session.telnet.write(cpr_reply)
-                    except Exception as e:
-                        logger.warning(f"Failed to respond to VT CPR query: {e}")
-                if b"\x1b[5n" in data:
-                    try:
-                        session.telnet.write(b"\x1b[0n")
-                    except Exception as e:
-                        logger.warning(f"Failed to respond to VT DSR query: {e}")
-
-                text = data.decode("utf-8", errors="ignore")
-                async with session.lock:
-                    session.accumulated_output += text
-                    session.unconsumed_output += text
-                    session.total_bytes_received += len(data)
-                    session.last_activity = time.time()
-                    if session.stream:
-                        try:
-                            session.stream.feed(text)
-                        except Exception as e:
-                            logger.warning(f"Error feeding telnet text to pyte stream: {e}")
-
-                if session.logger:
-                    session.logger.log_stream_chunk(
-                        session_id=session.session_id,
-                        chunk=text,
-                    )
-            await asyncio.sleep(0.02)
-    except asyncio.CancelledError:
-        pass
+                _answer_vt_queries(session, data)
+                _ingest_chunk(session, data, arrived_at)
     except Exception as e:
-        logger.error(f"Background telnet reader loop crashed for {session.session_id}: {e}")
+        logger.error(f"Background telnet reader crashed for {session.session_id}: {e}")
+    finally:
+        session.is_active = False
 
 
-async def _background_serial_reader_loop(session: SerialSession) -> None:
-    """Continuously reads raw bytes from serial port in background and buffers them."""
+def _serial_reader_thread(session: "SerialSession") -> None:
+    """Read the serial port whenever bytes arrive, until it fails or a stop request."""
+    ser = session.serial
     try:
-        while session.is_active:
+        while not session.stop_event.is_set():
             try:
-                # Read available bytes without long blocking
-                in_wait = getattr(session.serial, "in_waiting", 0)
-                to_read = max(1, in_wait or 1)
-                data = await asyncio.to_thread(session.serial.read, to_read)
+                # Blocks for at most the port's timeout (0.1 s, set at open).
+                in_wait = getattr(ser, "in_waiting", 0)
+                data = ser.read(max(1, in_wait or 1))
             except (serial.SerialException, OSError) as e:
-                logger.info(f"Serial port closed/disconnected for session {session.session_id}: {e}")
-                session.is_active = False
+                if not session.stop_event.is_set():
+                    logger.info(f"Serial port closed/disconnected for session {session.session_id}: {e}")
                 break
             except Exception as e:
+                if session.stop_event.is_set():
+                    break
                 logger.warning(f"Error reading serial port in session {session.session_id}: {e}")
-                await asyncio.sleep(0.05)
+                session.stop_event.wait(0.05)
                 continue
-
-            if data:
-                # Automatic DEC VT terminal query handling
-                if b"\x1b[c" in data or b"\x1b[0c" in data or b"\x1bZ" in data:
-                    try:
-                        session.serial.write(b"\x1b[?62;1;2;6;7;8;9c")
-                    except Exception as e:
-                        logger.warning(f"Failed to respond to VT DA query: {e}")
-                if b"\x1b[6n" in data:
-                    try:
-                        cpr_reply = f"\x1b[{session.rows};{session.cols}R".encode("utf-8")
-                        session.serial.write(cpr_reply)
-                    except Exception as e:
-                        logger.warning(f"Failed to respond to VT CPR query: {e}")
-                if b"\x1b[5n" in data:
-                    try:
-                        session.serial.write(b"\x1b[0n")
-                    except Exception as e:
-                        logger.warning(f"Failed to respond to VT DSR query: {e}")
-
-                text = data.decode("utf-8", errors="ignore")
-                async with session.lock:
-                    session.accumulated_output += text
-                    session.unconsumed_output += text
-                    session.total_bytes_received += len(data)
-                    session.last_activity = time.time()
-                    if session.stream:
-                        try:
-                            session.stream.feed(text)
-                        except Exception as e:
-                            logger.warning(f"Error feeding serial text to pyte stream: {e}")
-
-                if session.logger:
-                    session.logger.log_stream_chunk(
-                        session_id=session.session_id,
-                        chunk=text,
-                    )
-            await asyncio.sleep(0.02)
-    except asyncio.CancelledError:
-        pass
+            if not data:
+                continue
+            arrived_at = time.time()
+            session.stop_event.wait(TerminalDefaults.READER_COALESCE_SECONDS)
+            try:
+                more = getattr(ser, "in_waiting", 0)
+                if more:
+                    data += ser.read(more)
+            except Exception:
+                pass  # the next read reports a failed port
+            _answer_vt_queries(session, data)
+            _ingest_chunk(session, data, arrived_at)
     except Exception as e:
-        logger.error(f"Background serial reader loop crashed for {session.session_id}: {e}")
+        logger.error(f"Background serial reader crashed for {session.session_id}: {e}")
+    finally:
+        session.is_active = False
+
+
+def _start_reader(session: Union["TelnetSession", "SerialSession"]) -> None:
+    """Start the session's reader thread unless one is already running."""
+    if session.reader_thread is not None and session.reader_thread.is_alive():
+        return
+    target = _telnet_reader_thread if isinstance(session, TelnetSession) else _serial_reader_thread
+    thread = threading.Thread(
+        target=target,
+        args=(session,),
+        name=f"{session.session_type}-reader-{session.session_id}",
+        daemon=True,
+    )
+    session.reader_thread = thread
+    thread.start()
+
+
+def _stop_session_io(session: Union["TelnetSession", "SerialSession"]) -> None:
+    """Stop the reader thread (bounded join), then close the socket or port. Blocking.
+
+    The transport is closed only after the join, so the descriptor cannot be reused
+    while the reader still selects on it; shutdown()/cancel_read() wake a blocked reader.
+    """
+    session.is_active = False
+    session.stop_event.set()
+
+    if isinstance(session, TelnetSession):
+        sock = session.telnet.get_socket()
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass  # already disconnected
+    else:
+        try:
+            cancel = getattr(session.serial, "cancel_read", None)
+            if cancel is not None:
+                cancel()
+        except Exception:
+            pass  # not every pyserial backend has it; the read timeout still ends it
+
+    thread = session.reader_thread
+    if thread is not None and thread is not threading.current_thread():
+        thread.join(TerminalDefaults.READER_JOIN_SECONDS)
+        if thread.is_alive():
+            logger.warning(
+                f"Reader thread for session {session.session_id} did not stop within "
+                f"{TerminalDefaults.READER_JOIN_SECONDS} s; closing the transport anyway"
+            )
+
+    if isinstance(session, TelnetSession):
+        try:
+            session.telnet.close()
+        except Exception as e:
+            logger.warning(f"Error closing telnet connection: {e}")
+    else:
+        try:
+            session.serial.close()
+        except Exception as e:
+            logger.warning(f"Error closing serial port: {e}")
 
 
 # ============================================================================
@@ -343,41 +460,26 @@ class SessionStore:
         self._sessions: dict[str, Union[TelnetSession, SerialSession]] = {}
 
     async def store(self, session: Union[TelnetSession, SerialSession]) -> None:
-        """Store a session and launch its background stream reader task."""
+        """Store a session and start its background reader thread.
+
+        A session already stored under the same ID (one that has died, since callers
+        only replace inactive sessions) has its reader stopped and its transport closed.
+        """
+        old = self._sessions.get(session.session_id)
         self._sessions[session.session_id] = session
-        if session.reader_task is None or session.reader_task.done():
-            if isinstance(session, TelnetSession):
-                session.reader_task = asyncio.create_task(_background_telnet_reader_loop(session))
-            elif isinstance(session, SerialSession):
-                session.reader_task = asyncio.create_task(_background_serial_reader_loop(session))
+        if old is not None and old is not session:
+            await asyncio.to_thread(_stop_session_io, old)
+        _start_reader(session)
 
     async def get(self, session_id: str) -> Optional[Union[TelnetSession, SerialSession]]:
         """Retrieve a session by ID."""
         return self._sessions.get(session_id)
 
     async def delete(self, session_id: str) -> None:
-        """Delete a session, cancel its background reader, and close port/socket."""
-        session = self._sessions.get(session_id)
+        """Delete a session, stop its background reader, and close port/socket."""
+        session = self._sessions.pop(session_id, None)
         if session:
-            session.is_active = False
-
-            if isinstance(session, TelnetSession):
-                try:
-                    await asyncio.to_thread(session.telnet.close)
-                except Exception as e:
-                    logger.warning(f"Error closing telnet connection: {e}")
-            elif isinstance(session, SerialSession):
-                try:
-                    await asyncio.to_thread(session.serial.close)
-                except Exception as e:
-                    logger.warning(f"Error closing serial port: {e}")
-
-            if session.reader_task and not session.reader_task.done():
-                session.reader_task.cancel()
-                try:
-                    await session.reader_task
-                except asyncio.CancelledError:
-                    pass
+            await asyncio.to_thread(_stop_session_io, session)
 
             if session.logger:
                 session.logger.log_session_end(
@@ -385,8 +487,6 @@ class SessionStore:
                     reason="Closed",
                     total_bytes=session.total_bytes_received,
                 )
-
-            del self._sessions[session_id]
 
     async def list_all(self) -> list[Union[TelnetSession, SerialSession]]:
         """List all active sessions."""
@@ -579,12 +679,12 @@ async def _wait_for_output(
 
     while time.time() - start_time < max_wait_seconds:
         if not session.is_active:
-            async with session.lock:
+            with session.lock:
                 out = session.unconsumed_output
                 session.unconsumed_output = ""
                 return out, True, None
 
-        async with session.lock:
+        with session.lock:
             current_output = session.accumulated_output[start_index:]
             last_activity = session.last_activity
 
@@ -592,20 +692,20 @@ async def _wait_for_output(
             match = compiled_pattern.search(current_output)
             if match:
                 matched_str = match.group(0)
-                async with session.lock:
+                with session.lock:
                     session.unconsumed_output = ""
                 return current_output, True, matched_str
 
         if idle_timeout and (time.time() - last_activity >= idle_timeout):
             if current_output:
-                async with session.lock:
+                with session.lock:
                     session.unconsumed_output = ""
                 return current_output, True, None
 
         await asyncio.sleep(0.1)
 
     # Reached max_wait_seconds
-    async with session.lock:
+    with session.lock:
         interim_output = session.accumulated_output[start_index:]
         session.unconsumed_output = ""
     return interim_output, False, None
@@ -683,13 +783,13 @@ async def telnet_client_tool(
     last_matched_prompt: Optional[str] = None
 
     for i, cmd in enumerate(commands):
-        async with session.lock:
+        with session.lock:
             cmd_start_index = len(session.accumulated_output)
             session.current_cmd_start_index = cmd_start_index
 
         cmd_bytes = (cmd + newline).encode("utf-8")
         try:
-            await asyncio.to_thread(session.telnet.write, cmd_bytes)
+            await asyncio.to_thread(_write_transport, session, cmd_bytes)
         except Exception as e:
             logger.error(f"Failed to write command '{cmd}' to session {actual_session_id}: {e}")
             session.is_active = False
@@ -754,7 +854,8 @@ async def telnet_read_session(
     if session is None or not isinstance(session, TelnetSession):
         raise ValueError(f"No active Telnet session found with ID '{session_id}'")
 
-    start_index = session.current_cmd_start_index if return_full_buffer else len(session.accumulated_output) - len(session.unconsumed_output)
+    with session.lock:
+        start_index = session.current_cmd_start_index if return_full_buffer else len(session.accumulated_output) - len(session.unconsumed_output)
 
     out, completed, prompt_match = await _wait_for_output(
         session=session,
@@ -794,12 +895,12 @@ async def telnet_send_input(
     if session is None or not isinstance(session, TelnetSession):
         raise ValueError(f"No active Telnet session found with ID '{session_id}'")
 
-    async with session.lock:
+    with session.lock:
         start_index = len(session.accumulated_output)
         session.current_cmd_start_index = start_index
 
     payload = input_text.encode("utf-8") if raw else (input_text + newline).encode("utf-8")
-    await asyncio.to_thread(session.telnet.write, payload)
+    await asyncio.to_thread(_write_transport, session, payload)
 
     if session.logger:
         session.logger.log_input(session_id=session_id, input_text=input_text)
@@ -913,14 +1014,13 @@ async def serial_client_tool(
     last_matched_prompt: Optional[str] = None
 
     for i, cmd in enumerate(commands):
-        async with session.lock:
+        with session.lock:
             cmd_start_index = len(session.accumulated_output)
             session.current_cmd_start_index = cmd_start_index
 
         cmd_bytes = (cmd + newline).encode("utf-8")
         try:
-            await asyncio.to_thread(session.serial.write, cmd_bytes)
-            await asyncio.to_thread(session.serial.flush)
+            await asyncio.to_thread(_write_transport, session, cmd_bytes, True)
         except Exception as e:
             logger.error(f"Failed to write command '{cmd}' to serial session {actual_session_id}: {e}")
             session.is_active = False
@@ -985,7 +1085,8 @@ async def serial_read_session(
     if session is None or not isinstance(session, SerialSession):
         raise ValueError(f"No active Serial session found with ID '{session_id}'")
 
-    start_index = session.current_cmd_start_index if return_full_buffer else len(session.accumulated_output) - len(session.unconsumed_output)
+    with session.lock:
+        start_index = session.current_cmd_start_index if return_full_buffer else len(session.accumulated_output) - len(session.unconsumed_output)
 
     out, completed, prompt_match = await _wait_for_output(
         session=session,
@@ -1025,13 +1126,12 @@ async def serial_send_input(
     if session is None or not isinstance(session, SerialSession):
         raise ValueError(f"No active Serial session found with ID '{session_id}'")
 
-    async with session.lock:
+    with session.lock:
         start_index = len(session.accumulated_output)
         session.current_cmd_start_index = start_index
 
     payload = input_text.encode("utf-8") if raw else (input_text + newline).encode("utf-8")
-    await asyncio.to_thread(session.serial.write, payload)
-    await asyncio.to_thread(session.serial.flush)
+    await asyncio.to_thread(_write_transport, session, payload, True)
 
     if session.logger:
         session.logger.log_input(session_id=session_id, input_text=input_text)
@@ -1083,12 +1183,16 @@ async def serial_send_break(
             ),
         )
 
-    async with session.lock:
+    with session.lock:
         start_index = len(session.accumulated_output)
         session.current_cmd_start_index = start_index
 
     try:
-        await asyncio.to_thread(session.serial.send_break, duration=duration)
+        def _send_break() -> None:
+            with session.write_lock:
+                session.serial.send_break(duration=duration)
+
+        await asyncio.to_thread(_send_break)
     except Exception as e:
         return SerialSendBreakOutput(
             session_id=session_id,
@@ -1243,6 +1347,8 @@ async def list_sessions() -> SessionListResponse:
     now = time.time()
 
     for s in sessions:
+        with s.lock:
+            total_bytes = s.total_bytes_received
         if isinstance(s, TelnetSession):
             sessions_dict[s.session_id] = SessionInfo(
                 session_id=s.session_id,
@@ -1253,7 +1359,7 @@ async def list_sessions() -> SessionListResponse:
                 created_at=s.created_at,
                 age_seconds=round(now - s.created_at, 1),
                 is_active=s.is_active,
-                total_bytes_received=s.total_bytes_received,
+                total_bytes_received=total_bytes,
             )
         elif isinstance(s, SerialSession):
             sessions_dict[s.session_id] = SessionInfo(
@@ -1265,7 +1371,7 @@ async def list_sessions() -> SessionListResponse:
                 created_at=s.created_at,
                 age_seconds=round(now - s.created_at, 1),
                 is_active=s.is_active,
-                total_bytes_received=s.total_bytes_received,
+                total_bytes_received=total_bytes,
             )
 
     return SessionListResponse(
@@ -1424,12 +1530,38 @@ def _extract_screen_output(session: Union[TelnetSession, SerialSession]) -> Term
     )
 
 
+def _screen_sig(out: TerminalScreenOutput) -> tuple:
+    """What counts as 'the screen changed': text, reverse video, cursor place and visibility."""
+    return (out.screen_text, out.annotated_text, out.cursor_row, out.cursor_col, out.cursor_visible)
+
+
+def _read_screen(session: Union[TelnetSession, SerialSession]) -> TerminalScreenOutput:
+    """Render the screen for a client under the state lock, and remember it as the
+    baseline terminal_wait_for_change compares against."""
+    with session.lock:
+        out = _extract_screen_output(session)
+        session.last_read_sig = _screen_sig(out)
+    return out
+
+
+def _clamp_wait_timeout(timeout_seconds: float) -> float:
+    """Clamp a wait to [0, WAIT_FOR_CHANGE_MAX_TIMEOUT]; NaN counts as 0."""
+    t = float(timeout_seconds)
+    if t != t:
+        return 0.0
+    return min(max(t, 0.0), TerminalDefaults.WAIT_FOR_CHANGE_MAX_TIMEOUT)
+
+
 @tool(name="terminal_get_screen")
 async def terminal_get_screen(
     session_id: str,
     wait_seconds: float = 0.0,
 ) -> TerminalScreenOutput:
-    """Inspect the rendered 2D terminal canvas, cursor position, and highlighted reverse-video text."""
+    """Inspect the rendered 2D terminal canvas, cursor position, and highlighted reverse-video text.
+
+    The screen is always current: a background thread reads the session as bytes arrive,
+    so wait_seconds=0 shows everything received so far. To wait for the screen to change,
+    use terminal_wait_for_change."""
     session = await _session_store.get(session_id)
     if session is None:
         raise ValueError(f"No active session found with ID '{session_id}'")
@@ -1437,8 +1569,7 @@ async def terminal_get_screen(
     if wait_seconds > 0:
         await asyncio.sleep(wait_seconds)
 
-    async with session.lock:
-        return _extract_screen_output(session)
+    return _read_screen(session)
 
 
 @tool(name="terminal_send_key")
@@ -1462,10 +1593,8 @@ async def terminal_send_key(
         # Fallback: interpret as utf-8 literal sequence
         payload = key_normalized.encode("utf-8")
 
-    if isinstance(session, TelnetSession):
-        await asyncio.to_thread(session.telnet.write, payload)
-    elif isinstance(session, SerialSession):
-        await asyncio.to_thread(session.serial.write, payload)
+    if isinstance(session, (TelnetSession, SerialSession)):
+        await asyncio.to_thread(_write_transport, session, payload)
     else:
         raise ValueError(f"Unsupported session type for session '{session_id}'")
 
@@ -1475,8 +1604,7 @@ async def terminal_send_key(
     if wait_seconds > 0:
         await asyncio.sleep(wait_seconds)
 
-    async with session.lock:
-        screen_output = _extract_screen_output(session)
+    screen_output = _read_screen(session)
 
     return TerminalSendKeyOutput(
         session_id=session_id,
@@ -1489,6 +1617,92 @@ async def terminal_send_key(
         cursor_row=screen_output.cursor_row,
         cursor_col=screen_output.cursor_col,
         cursor_visible=screen_output.cursor_visible,
+    )
+
+
+@tool(name="terminal_wait_for_change")
+async def terminal_wait_for_change(
+    session_id: str,
+    timeout_seconds: float = 30.0,
+    settle_seconds: float = 0.3,
+    pattern: Optional[str] = None,
+) -> TerminalWaitForChangeOutput:
+    """Wait, in one call, for the terminal screen to change, then return it.
+
+    Returns as soon as the screen differs from the last screen this server returned for
+    the session (terminal_get_screen, terminal_send_key or this call) AND no byte has
+    arrived for settle_seconds (default 0.3; a full repaint at 9600 baud takes about 2 s).
+    With pattern (a Python regular expression searched in screen_text) it instead returns
+    once the pattern is on the screen and the screen has settled, changed or not.
+    Otherwise it returns the current screen at timeout_seconds (capped at 300) with
+    timed_out true. It also returns at once if the session ends."""
+    session = await _session_store.get(session_id)
+    if session is None:
+        raise ValueError(f"No active session found with ID '{session_id}'")
+
+    compiled = re.compile(pattern) if pattern else None  # a bad pattern fails before waiting
+    timeout = _clamp_wait_timeout(timeout_seconds)
+    settle = min(_clamp_wait_timeout(settle_seconds), timeout)
+    start = time.monotonic()
+    deadline = start + timeout
+
+    with session.lock:
+        baseline = session.last_read_sig
+        if baseline is None:
+            # No screen returned yet: the baseline is the screen as the wait starts.
+            baseline = _screen_sig(_extract_screen_output(session))
+        bytes_at_start = session.total_bytes_received
+
+    out: Optional[TerminalScreenOutput] = None
+    seen_seq = -1
+    changed = False
+    matched: Optional[str] = None
+    timed_out = False
+    while True:
+        now = time.monotonic()
+        with session.lock:
+            if session.screen_seq != seen_seq or out is None:
+                # Render only when the reader has fed pyte since the last look.
+                seen_seq = session.screen_seq
+                out = _extract_screen_output(session)
+                changed = _screen_sig(out) != baseline
+                if compiled is not None:
+                    m = compiled.search(out.screen_text)
+                    matched = m.group(0) if m else None
+            quiet = now - session.last_rx_monotonic >= settle
+            active = session.is_active
+        done = (matched is not None) if compiled is not None else changed
+        if done and quiet:
+            break
+        if not active:
+            break
+        if now >= deadline:
+            timed_out = True
+            break
+        await asyncio.sleep(min(TerminalDefaults.WAIT_FOR_CHANGE_POLL_SECONDS, max(0.0, deadline - now)))
+
+    with session.lock:
+        session.last_read_sig = _screen_sig(out)
+        bytes_received = session.total_bytes_received - bytes_at_start
+        active = session.is_active
+
+    return TerminalWaitForChangeOutput(
+        session_id=session_id,
+        changed=changed,
+        timed_out=timed_out,
+        pattern_matched=matched,
+        waited_seconds=round(time.monotonic() - start, 3),
+        bytes_received=bytes_received,
+        session_active=active,
+        rows=out.rows,
+        cols=out.cols,
+        cursor_row=out.cursor_row,
+        cursor_col=out.cursor_col,
+        cursor_visible=out.cursor_visible,
+        cursor_char=out.cursor_char,
+        screen_text=out.screen_text,
+        annotated_text=out.annotated_text,
+        highlighted_lines=out.highlighted_lines,
     )
 
 
@@ -1507,7 +1721,7 @@ async def terminal_resize(
         raise ValueError(f"Invalid terminal dimensions: cols={cols}, rows={rows}")
 
     naws_sent = False
-    async with session.lock:
+    with session.lock:
         session.cols = cols
         session.rows = rows
         if session.screen:
@@ -1525,7 +1739,12 @@ async def terminal_resize(
             ])
             sock = session.telnet.get_socket()
             if sock:
-                await asyncio.to_thread(sock.sendall, naws_bytes)
+                # Raw sendall, not telnet.write(): the IAC bytes must not be escaped.
+                def _send_naws() -> None:
+                    with session.write_lock:
+                        sock.sendall(naws_bytes)
+
+                await asyncio.to_thread(_send_naws)
                 naws_sent = True
         except Exception as e:
             logger.warning(f"Failed to transmit Telnet NAWS resize packet: {e}")

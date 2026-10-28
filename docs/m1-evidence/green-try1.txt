@@ -1,0 +1,102 @@
+2026-10-28 07:52:54 EDT
+load 3.03 8.83 8.61 2/2941 3737918
+============================= test session starts ==============================
+platform linux -- Python 3.12.15, pytest-9.2.0, pluggy-1.7.0 -- ~/src/chuk-mcp-telnet-client-m1/.venv/bin/python
+rootdir: ~/src/chuk-mcp-telnet-client-m1
+configfile: pyproject.toml
+plugins: anyio-4.15.0
+collecting ... collected 10 items
+
+tests/test_m1_live_reader.py::test_idle_telnet_screen_is_current_over_stdio load 2.87 8.70 8.57 2/2979 3738136; LATER sent +2.00 s; read at +4.50 s
+PASSED
+tests/test_m1_live_reader.py::test_transcript_chunk_stamped_on_arrival load 2.80 8.59 8.53 3/2988 3738183; LATER chunk stamped +0.000 s from its send
+PASSED
+tests/test_m1_live_reader.py::test_wait_for_change_returns_after_settle load 2.73 8.48 8.50 2/2929 3738206; returned 0.333 s after L3; waited 2.33
+PASSED
+tests/test_m1_live_reader.py::test_wait_for_change_sees_change_made_before_the_call load 2.59 8.35 8.46 4/2897 3738269; returned in 0.001 s
+PASSED
+tests/test_m1_live_reader.py::test_wait_for_change_times_out_unchanged load 2.59 8.35 8.46 3/2904 3738291; timed out in 1.001 s
+PASSED
+tests/test_m1_live_reader.py::test_wait_for_change_pattern load 2.55 8.25 8.42 4/2923 3738639; returned 0.336 s after DONE
+PASSED
+tests/test_m1_live_reader.py::test_wait_for_change_caps_timeout PASSED
+tests/test_m1_live_reader.py::test_close_while_reader_blocked_100_cycles load 2.55 8.25 8.42 3/2925 3738894; worst close 0.000 s; reader threads left 0; fds before 10 after 107
+FAILED
+tests/test_m1_live_reader.py::test_serial_close_while_reader_blocked load 2.55 8.25 8.42 2/2925 3738897; serial close took 0.000 s
+PASSED
+tests/test_m1_live_reader.py::test_idle_serial_screen_is_current_over_stdio load 2.50 8.14 8.39 2/2956 3739406; LATER sent +1.50 s after connect; read +2.50 s after the send
+PASSED
+
+=================================== FAILURES ===================================
+__________________ test_close_while_reader_blocked_100_cycles __________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fa4404acb90>
+
+    def test_close_while_reader_blocked_100_cycles(monkeypatch):
+        """Each session's reader is blocked waiting for data that never comes; close must
+        end the thread (and free the socket) every time."""
+        from chuk_mcp_telnet_client import tools
+    
+        monkeypatch.setattr(tools.TerminalDefaults, "INITIAL_BANNER_WAIT", 0.0)
+    
+        srv = socket.socket()
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(128)
+        port = srv.getsockname()[1]
+        held = []
+        stop = threading.Event()
+    
+        def accept_loop():
+            srv.settimeout(0.2)
+            while not stop.is_set():
+                try:
+                    c, _ = srv.accept()
+                except (socket.timeout, OSError):
+                    continue
+                c.sendall(b"BANNER\r\n$ ")  # then silence: the reader blocks
+                held.append(c)
+    
+        threading.Thread(target=accept_loop, daemon=True).start()
+    
+        async def run():
+            fds_before = _fd_count()
+            worst_close = 0.0
+            for i in range(100):
+                sid = f"cycle{i}"
+                await tools.telnet_client_tool(
+                    host="127.0.0.1", port=port, commands=[], telnet_session_id=sid,
+                    enable_logging=False)
+                await asyncio.sleep(0.01)
+                alive = [t for t in _reader_threads() if t.name.endswith(sid)]
+                assert len(alive) == 1 and alive[0].is_alive(), f"cycle {i}: no live reader thread"
+                t0 = time.monotonic()
+                await tools.telnet_close_session(sid)
+                worst_close = max(worst_close, time.monotonic() - t0)
+                assert not alive[0].is_alive(), f"cycle {i}: reader still alive after close"
+            return fds_before, worst_close
+    
+        try:
+            fds_before, worst_close = asyncio.run(run())
+            leaked = _reader_threads()
+            print(f"load {_load()}; worst close {worst_close:.3f} s; reader threads left {len(leaked)}; "
+                  f"fds before {fds_before} after {_fd_count()}")
+            assert leaked == []
+            assert worst_close < 1.0
+            # Our 100 client sockets are closed (the server's held ends are not ours to count).
+>           assert _fd_count() <= fds_before + 2
+E           assert 107 <= (10 + 2)
+E            +  where 107 = _fd_count()
+
+tests/test_m1_live_reader.py:449: AssertionError
+=============================== warnings summary ===============================
+tests/test_m1_live_reader.py::test_wait_for_change_caps_timeout
+  ~/src/chuk-mcp-telnet-client-m1/chuk_mcp_telnet_client/tools.py:14: DeprecationWarning: 'telnetlib' is deprecated and slated for removal in Python 3.13
+    import telnetlib  # nosec B401 - telnet is part of this MCP server
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/test_m1_live_reader.py::test_close_while_reader_blocked_100_cycles
+=================== 1 failed, 9 passed, 1 warning in 33.79s ====================
+exit 1
+2026-10-28 07:53:28 EDT

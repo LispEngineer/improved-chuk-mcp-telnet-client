@@ -19,6 +19,8 @@ A unified **Model Context Protocol (MCP)** Terminal Communications Server design
 * **Configurable Command Line Terminators (`newline`, v0.7.0)**: Supports custom newline strings across Telnet and Serial tools (default `\r\n`, with `\r` for OpenVMS serial consoles).
 * **Virtual Terminal Screen Emulation (v0.6.0)**: In-memory DEC VT100 / VT220 terminal emulation powered by `pyte` (v0.8.2), providing AI agents with visual inspection of full-screen TUI applications (OpenVMS SMG$, curses, text editors, menu systems).
 * **2D Canvas Inspection (`terminal_get_screen`)**: Extracts a clean 2D text matrix (default 80×24, dynamically resizable) along with 1-based cursor coordinates (`cursor_row`, `cursor_col`) and cursor visibility.
+* **Always-Current Screen (v0.7.1)**: Each session's reader runs in its own background thread, reading the socket or port as bytes arrive, whether or not a tool call is running. A screen read is therefore always current, even with `wait_seconds=0`, and transcript chunks are stamped when they arrive.
+* **Wait for the Screen to Change (`terminal_wait_for_change`, v0.7.1)**: One call that returns as soon as the screen has changed (or shows a regular expression) and then stayed quiet for a settle time, or at a timeout - instead of a model turn per screen check.
 * **DEC Special Graphics Translation**: Translates DEC line-drawing character sets into clean Unicode box characters (`┌`, `─`, `┐`, `└`, `┘`, `│`, `┼`, `├`, `┤`, `┴`, `┬`) for native TUI border and window rendering.
 * **Reverse-Video Selection Tracking**: Identifies reverse-video attribute cells (`char.reverse == True`) to provide highlighted lines and formatted annotations (`* [Selected Item] *`).
 * **Ergonomic Key Dispatch (`terminal_send_key`)**: Translates named keys (`UP`, `DOWN`, `LEFT`, `RIGHT`, `TAB`, `ENTER`, `ESC`, `CTRL_Z`, `F1`–`F20`) into DEC VT escape sequences and immediately returns the updated screen state.
@@ -32,12 +34,39 @@ A unified **Model Context Protocol (MCP)** Terminal Communications Server design
 * **MCP 180-Second (3-Minute) Timeout Immunity**: Both Telnet and Serial tools implement non-blocking execution windows (`max_wait_seconds`) with background stream accumulation and interim progress returns (`command_completed: false`), preventing client tool aborts during long operations exceeding 3 minutes.
 * **Clean, Human-Readable Transcript Logging (Default)**: Emits a clean, contiguous text stream identical to standard Unix `script` or `picocom` session logging (header, raw readable console text in the body, footer at exit).
 * **Single Persistent File Per Session**: Each session maintains exactly one persistent log file (`<session_id>.log`). Sequential commands, streaming output chunks, interactive inputs, and status updates append contiguously without generating fragmented suffix files (`_1.log`, `_2.log`). Reconnecting with an existing session ID safely appends with a clear session start block.
-* **Explicit Server Version Reporting**: The server reports its version (`server_version: "0.7.0"`) directly in tool return models and session log headers.
+* **Explicit Server Version Reporting**: The server reports its version (`server_version: "0.7.1"`) directly in tool return models and session log headers.
 * **Unified Session Directory (`list_sessions`)**: Enumerates all active Telnet and Serial sessions with protocol type, target string, uptime, and byte transfer counters.
 
 ---
 
 ## Release History & Changes
+
+### Version 0.7.1
+* **Fixed: stale screens between tool calls.** In stdio mode (the default, and
+  how MCP clients such as Codex and Claude Code start the server),
+  `chuk_mcp_server`'s `StdioSyncTransport` blocks in `sys.stdin.readline()`
+  between requests and runs the asyncio event loop only while it serves one.
+  Up to 0.7.0 each session's background reader was an asyncio task on that
+  loop, so **between tool calls nothing read the socket or serial port**:
+  * `terminal_get_screen` with `wait_seconds=0` returned the screen as of the
+    previous call, even when new output had arrived seconds before;
+  * the transcript stamped a chunk with the time the reader got round to it,
+    not the time it arrived (measured: 2.5 s to 9.5 s late).
+* **Now each Telnet and serial session's reader is a daemon thread**
+  (`telnet-reader-<id>` / `serial-reader-<id>`) that reads whenever bytes
+  arrive, answers the VT queries, feeds the pyte screen and the buffers under
+  a lock, and stamps each transcript chunk on arrival. **A screen read is
+  always current.** `wait_seconds` on `terminal_get_screen` still works, but is
+  no longer needed to "let the reader catch up".
+* Closing a session stops its reader (the blocked read is woken at once), joins
+  the thread (bounded at 2 s) and then closes the socket or port.
+* All writes to a session (commands, keys, VT replies, NAWS, BREAK) are
+  serialised by a per-session write lock; the transcript file by a logger lock.
+* **New tool `terminal_wait_for_change`** (below).
+* No existing tool's name, arguments or result shape changed. `server_version`
+  reports `0.7.1`.
+* Design notes and the evidence (tests RED on 0.7.0, GREEN here, sabotage
+  runs): [`docs/m1-live-reader.md`](docs/m1-live-reader.md).
 
 ### Version 0.7.0
 * **Network-Bridged Serial Console Support (`serial_client`)**:
@@ -120,11 +149,12 @@ A unified **Model Context Protocol (MCP)** Terminal Communications Server design
 
 ## MCP Tools Reference
 
-The server exposes 16 MCP tools across Telnet, Serial, and Visual Terminal categories:
+The server exposes 17 MCP tools across Telnet, Serial, and Visual Terminal categories:
 
 | Tool | Category | Purpose | Key Arguments |
 | :--- | :--- | :--- | :--- |
-| `terminal_get_screen` | Visual | Inspects the rendered 2D terminal canvas, cursor position, and highlighted reverse-video text. | `session_id`, `wait_seconds` |
+| `terminal_get_screen` | Visual | Inspects the rendered 2D terminal canvas, cursor position, and highlighted reverse-video text. Always current (v0.7.1): `wait_seconds=0` shows everything received so far. | `session_id`, `wait_seconds` |
+| `terminal_wait_for_change` | Visual | Waits in one call until the screen changes since the last screen read (or shows `pattern`) and has been quiet for `settle_seconds`, then returns it; or returns at `timeout_seconds` (capped at 300). | `session_id`, `timeout_seconds`, `settle_seconds`, `pattern` |
 | `terminal_send_key` | Visual | Sends named keyboard keys or VT escape sequences (e.g. `UP`, `DOWN`, `TAB`, `ENTER`, `ESC`, `CTRL_Z`) and returns the updated screen. | `session_id`, `key`, `wait_seconds` |
 | `terminal_resize` | Visual | Dynamically resizes the virtual terminal canvas and sends RFC 1073 Telnet NAWS window resize negotiation. | `session_id`, `cols`, `rows` |
 | `telnet_client` | Telnet | Connects or sends command sequences via Telnet with prompt waiting and session logging. | `host`, `port`, `commands`, `telnet_session_id`, `prompt_pattern`, `newline`, `max_wait_seconds` |
@@ -194,7 +224,51 @@ await terminal_send_key(session_id="vms_session", key="ESC")
 await terminal_send_key(session_id="vms_session", key="CTRL_Z")
 ```
 
-### 3. Dynamic Terminal Resizing (`terminal_resize`)
+### 3. Waiting for the Screen to Change (`terminal_wait_for_change`, v0.7.1)
+
+```python
+# After a key that starts something slow, wait for the screen to change and
+# settle, instead of polling terminal_get_screen once per model turn:
+r = await terminal_wait_for_change(session_id="vms_session",
+                                   timeout_seconds=60, settle_seconds=0.3)
+if r.changed:            # the screen differs from the last one returned
+    print(r.screen_text)
+elif r.timed_out:        # nothing changed within 60 s
+    ...
+
+# Or wait for particular text (a Python regular expression on screen_text):
+r = await terminal_wait_for_change(session_id="vms_session",
+                                   timeout_seconds=120, pattern=r"DONE \d+")
+print(r.pattern_matched)  # e.g. "DONE 42", or None at the timeout
+```
+
+* **Baseline**: "changed" compares with the last screen this server *returned*
+  for the session - from `terminal_get_screen`, `terminal_send_key` or this
+  call. Output that arrived while no call was running counts, so a change
+  that has already happened returns at once. If no screen has been returned
+  yet, the baseline is the screen when the wait starts. A change is any
+  difference in the text, the reverse-video annotation, or the cursor's
+  position or visibility; bytes that repaint the same screen are not one.
+* **Settle**: "quiet" means no byte has arrived for `settle_seconds` (default
+  0.3 s). A full 80x24 repaint over a 9600-baud line takes about 2 s, but
+  arrives continuously, so the default settle waits for its end. Raise it
+  for a program that pauses mid-repaint.
+* **Pattern**: with `pattern`, the wait ends when the pattern is on the screen
+  and the screen has settled, whether or not it changed (so text that is
+  already there returns at once). An invalid pattern is an error before any
+  wait.
+* **Result**: the screen fields of `terminal_get_screen`, plus `changed`,
+  `timed_out`, `pattern_matched`, `waited_seconds`, `bytes_received` (during
+  the wait) and `session_active`. It returns at once if the session ends. At
+  the timeout, `changed` can still be true if output never went quiet.
+* **Limits**: `timeout_seconds` is clamped to 0-300 so a call cannot hang a
+  client for ever; `settle_seconds` to 0-`timeout_seconds`. Keep
+  `timeout_seconds` under your MCP client's own tool-call timeout. In stdio
+  mode the server handles one request at a time, so while a wait runs, no
+  other call to the same server (for any session) is answered; the readers
+  keep reading meanwhile, so nothing is lost.
+
+### 4. Dynamic Terminal Resizing (`terminal_resize`)
 ```python
 # Expand terminal to 132 columns x 50 rows via RFC 1073 Telnet NAWS:
 await terminal_resize(session_id="vms_session", cols=132, rows=50)
@@ -421,7 +495,7 @@ first use no matter how cleanly it installed.
 ## Running the Automated Test Suite
 
 ```bash
-# Run the complete test suite (all 45 unit and integration tests):
+# Run the complete test suite (all 55 unit and integration tests):
 VAX_LONG_TEST_DURATION=3 pytest tests/
 ```
 

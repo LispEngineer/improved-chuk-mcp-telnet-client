@@ -1,0 +1,49 @@
+2026-10-28 07:49:52 EDT
+load 14.50 14.18 9.93 20/2939 3725045
+============================= test session starts ==============================
+platform linux -- Python 3.12.15, pytest-9.2.0, pluggy-1.7.0 -- ~/src/chuk-mcp-telnet-client-m1/.venv/bin/python
+rootdir: ~/src/chuk-mcp-telnet-client-m1
+configfile: pyproject.toml
+plugins: anyio-4.15.0
+collecting ... collected 10 items / 9 deselected / 1 selected
+
+tests/test_m1_live_reader.py::test_idle_serial_screen_is_current_over_stdio load 14.78 14.25 9.98 2/2966 3725296; LATER sent +1.50 s after connect; read +2.50 s after the send
+FAILED
+
+=================================== FAILURES ===================================
+________________ test_idle_serial_screen_is_current_over_stdio _________________
+
+mcp = <test_m1_live_reader.Mcp object at 0x7fb2954cf2c0>
+
+    def test_idle_serial_screen_is_current_over_stdio(mcp):
+        master, slave = pty.openpty()
+        tty.setraw(master)
+        tty.setraw(slave)
+        path = os.ttyname(slave)
+        try:
+            # Nothing is written before the open: pyserial's open() discards pending input
+            # (serialposix.py, _reset_input_buffer), so a pre-open banner never arrives.
+            mcp.tool("serial_client", {
+                "port": path, "commands": [], "serial_session_id": "sidle", "response_wait": 0.5})
+            t_conn = time.time()
+            time.sleep(1.5)
+            os.write(master, b"\r\nLATER\r\n")
+            t_sent = time.time()
+            time.sleep(2.5)  # no call during this stretch
+            r = mcp.tool("terminal_get_screen", {"session_id": "sidle"})
+            print(f"load {_load()}; LATER sent +{t_sent - t_conn:.2f} s after connect; "
+                  f"read +{time.time() - t_sent:.2f} s after the send")
+            stale = "LATER" not in r["screen_text"]
+            # Control: a read that gives even the 0.7.0 reader time does see it, so a RED
+            # above is staleness, not a session that never receives anything.
+            r1 = mcp.tool("terminal_get_screen", {"session_id": "sidle", "wait_seconds": 1.0})
+            assert "LATER" in r1["screen_text"], "control: LATER never reached the screen"
+>           assert not stale, "wait-0 serial screen is stale: LATER not on it"
+E           AssertionError: wait-0 serial screen is stale: LATER not on it
+E           assert not True
+
+tests/test_m1_live_reader.py:515: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_m1_live_reader.py::test_idle_serial_screen_is_current_over_stdio
+======================= 1 failed, 9 deselected in 5.83s ========================
+exit 1

@@ -1,0 +1,72 @@
+sabotage run 2026-10-28 07:55:26 EDT, load 7.11 7.21 7.97 2/2967 3746013
+tools.py sha256 before: 67ca1226791cb7055a6f9faafc95b16cfa1ca138ee0401a09cd224bc6531712c
+=== S1 close does not stop the reader or close the transport  (-k 'close_while or serial_close'): pytest exit 1
+    tests/test_m1_live_reader.py:454: 
+    E           AssertionError: cycle 0: reader still alive after close
+    E           assert not True
+    E            +  where True = is_alive()
+    E            +    where is_alive = <Thread(telnet-reader-cycle0, started daemon 140686502385344)>.is_alive
+    tests/test_m1_live_reader.py:445: AssertionError
+    tests/test_m1_live_reader.py:492: 
+    E       assert not True
+    E        +  where True = is_alive()
+    E        +    where is_alive = <Thread(serial-reader-sclose, started daemon 140686519170752)>.is_alive
+    tests/test_m1_live_reader.py:488: AssertionError
+    tests/test_m1_live_reader.py::test_close_while_reader_blocked_100_cycles
+    FAILED tests/test_m1_live_reader.py::test_close_while_reader_blocked_100_cycles
+    FAILED tests/test_m1_live_reader.py::test_serial_close_while_reader_blocked
+    2 failed, 8 deselected, 1 warning in 0.47s
+=== S2 close stops the reader but never closes the socket  (-k '100_cycles'): pytest exit 1
+    tests/test_m1_live_reader.py:454: 
+    E           AssertionError: cycle 0: socket not closed
+    E           assert <socket.socket fd=9, family=2, type=1, proto=6, laddr=('127.0.0.1', 42374), raddr=('127.0.0.1', 40851)> is None
+    E            +  where <socket.socket fd=9, family=2, type=1, proto=6, laddr=('127.0.0.1', 42374), raddr=('127.0.0.1', 40851)> = get_socket()
+    E            +    where get_socket = <telnetlib.Telnet object at 0x7f8bed247d40>.get_socket
+    E            +      where <telnetlib.Telnet object at 0x7f8bed247d40> = TelnetSession(telnet=<telnetlib.Telnet object at 0x7f8bed247d40>, host='127.0.0.1', port=40851, created_at=1793188527....am=<pyte.streams.Stream obj
+    tests/test_m1_live_reader.py:446: AssertionError
+    tests/test_m1_live_reader.py::test_close_while_reader_blocked_100_cycles
+    FAILED tests/test_m1_live_reader.py::test_close_while_reader_blocked_100_cycles
+    1 failed, 9 deselected, 1 warning in 0.40s
+=== S3 wait ignores settle (returns at the first change)  (-k 'returns_after_settle or wait_for_change_pattern'): pytest exit 1
+    Fload 7.84 7.36 8.00 20/2991 3747260; returned 0.037 s after DONE
+    E               AssertionError: L2 missing: returned before the burst settled
+    E               assert 'L2' in 'FIRST\n$\nL1\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n'
+    tests/test_m1_live_reader.py:292: AssertionError
+                print(f"load {_load()}; returned {after:.3f} s after DONE")
+    E           assert (0.3 - 0.05) <= 0.03702831268310547
+    tests/test_m1_live_reader.py:362: AssertionError
+    FAILED tests/test_m1_live_reader.py::test_wait_for_change_returns_after_settle
+    FAILED tests/test_m1_live_reader.py::test_wait_for_change_pattern - assert (0...
+    2 failed, 8 deselected in 7.53s
+=== S4 wait ignores the last screen read (baseline = screen at call start)  (-k 'sees_change_made_before'): pytest exit 1
+    load 10.84 8.01 8.21 19/2928 3747521; returned in 5.002 s
+                print(f"load {_load()}; returned in {took:.3f} s")
+    E           assert (False is True)
+    tests/test_m1_live_reader.py:318: AssertionError
+    FAILED tests/test_m1_live_reader.py::test_wait_for_change_sees_change_made_before_the_call
+    1 failed, 9 deselected in 9.27s
+=== S5 wait ignores the pattern (ends at any change)  (-k 'wait_for_change_pattern'): pytest exit 1
+    E           AssertionError: returned without the pattern: 'FIRST\n$\nWorking...\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n'
+    E           assert None == 'DONE 42'
+    tests/test_m1_live_reader.py:357: AssertionError
+    FAILED tests/test_m1_live_reader.py::test_wait_for_change_pattern - Assertion...
+    1 failed, 9 deselected in 3.08s
+=== S6 the reader thread is never started (0.7.0's fault: nothing reads between calls)  (-k 'idle_telnet or idle_serial or stamped_on_arrival'): pytest exit 1
+    load 11.25 8.14 8.25 20/2946 3748426; LATER sent +2.00 s; read at +4.50 s
+    FFload 11.72 8.39 8.33 19/2996 3748590; LATER sent +1.50 s after connect; read +2.50 s after the send
+                print(f"load {_load()}; LATER sent +{srv.sent['LATER'] - srv.accepted_at:.2f} s; "
+    E           AssertionError: wait-0 screen is stale: LATER not on it
+    E           assert 'LATER' in 'FIRST\n$\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n'
+    tests/test_m1_live_reader.py:239: AssertionError
+    E           AssertionError: no STREAM DATA chunk with LATER in /tmp/m1_live_reader_aua_oie5/stamp1.log
+    E           assert []
+    tests/test_m1_live_reader.py:261: AssertionError
+                print(f"load {_load()}; LATER sent +{t_sent - t_conn:.2f} s after connect; "
+    E           AssertionError: control: LATER never reached the screen
+    E           assert 'LATER' in '\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n'
+    tests/test_m1_live_reader.py:528: AssertionError
+    FAILED tests/test_m1_live_reader.py::test_idle_telnet_screen_is_current_over_stdio
+    FAILED tests/test_m1_live_reader.py::test_transcript_chunk_stamped_on_arrival
+    FAILED tests/test_m1_live_reader.py::test_idle_serial_screen_is_current_over_stdio
+    3 failed, 7 deselected in 16.21s
+tools.py sha256 after:  67ca1226791cb7055a6f9faafc95b16cfa1ca138ee0401a09cd224bc6531712c (restored: True)

@@ -21,7 +21,7 @@ class CommandResponse(BaseModel):
 
 
 class TelnetClientOutput(BaseModel):
-    server_version: str = "0.7.0"
+    server_version: str = "0.7.1"
     host: str
     port: int
     initial_banner: str
@@ -74,7 +74,7 @@ class SerialClientInput(BaseModel):
 
 
 class SerialClientOutput(BaseModel):
-    server_version: str = "0.7.0"
+    server_version: str = "0.7.1"
     port: str
     baudrate: int
     initial_banner: str
@@ -156,13 +156,13 @@ class SessionInfo(BaseModel):
     age_seconds: float
     is_active: bool
     total_bytes_received: int
-    server_version: str = "0.7.0"
+    server_version: str = "0.7.1"
 
 
 class SessionListResponse(BaseModel):
     """Response for listing all active sessions."""
 
-    server_version: str = "0.7.0"
+    server_version: str = "0.7.1"
     active_sessions: int
     sessions: Dict[str, SessionInfo]
     note: str = (
@@ -195,7 +195,29 @@ class TerminalScreenOutput(BaseModel):
     screen_text: str
     annotated_text: str
     highlighted_lines: List[int]
-    server_version: str = "0.7.0"
+    server_version: str = "0.7.1"
+
+
+class TerminalWaitForChangeOutput(BaseModel):
+    """Result of terminal_wait_for_change: why the wait ended, and the screen at that moment."""
+
+    session_id: str
+    changed: bool = Field(..., description="The screen differs from the last screen returned for this session.")
+    timed_out: bool = Field(..., description="The wait ended at timeout_seconds, its condition not met.")
+    pattern_matched: Optional[str] = Field(None, description="The text the pattern matched on the returned screen.")
+    waited_seconds: float
+    bytes_received: int = Field(..., description="Bytes that arrived during the wait.")
+    session_active: bool
+    rows: int
+    cols: int
+    cursor_row: int
+    cursor_col: int
+    cursor_visible: bool = True
+    cursor_char: Optional[str] = None
+    screen_text: str
+    annotated_text: str
+    highlighted_lines: List[int]
+    server_version: str = "0.7.1"
 
 
 class TerminalSendKeyOutput(BaseModel):
@@ -211,7 +233,7 @@ class TerminalSendKeyOutput(BaseModel):
     cursor_row: Optional[int] = None
     cursor_col: Optional[int] = None
     cursor_visible: Optional[bool] = None
-    server_version: str = "0.7.0"
+    server_version: str = "0.7.1"
 
 
 class TerminalResizeOutput(BaseModel):
@@ -223,5 +245,5 @@ class TerminalResizeOutput(BaseModel):
     naws_sent: bool
     success: bool
     message: str
-    server_version: str = "0.7.0"
+    server_version: str = "0.7.1"
 

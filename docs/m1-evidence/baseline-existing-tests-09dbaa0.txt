@@ -1,0 +1,19 @@
+2026-10-28 07:45:49 EDT
+19.76 12.18 8.13 36/3002 3700331
+09dbaa0
+=============================== warnings summary ===============================
+chuk_mcp_telnet_client/tools.py:12
+  ~/src/chuk-mcp-telnet-client-m1/chuk_mcp_telnet_client/tools.py:12: DeprecationWarning: 'telnetlib' is deprecated and slated for removal in Python 3.13
+    import telnetlib  # nosec B401 - telnet is part of this MCP server
+
+tests/test_standalone_serial.py::test_network_serial_fallback_from_host_port
+  ~/src/chuk-mcp-telnet-client-m1/.venv/lib/python3.12/site-packages/serial/rfc2217.py:465: DeprecationWarning: setDaemon() is deprecated, set the daemon attribute instead
+    self._thread.setDaemon(True)
+
+tests/test_standalone_serial.py::test_network_serial_fallback_from_host_port
+  ~/src/chuk-mcp-telnet-client-m1/.venv/lib/python3.12/site-packages/serial/rfc2217.py:466: DeprecationWarning: setName() is deprecated, set the name attribute instead
+    self._thread.setName('pySerial RFC 2217 reader thread for {}'.format(self._port))
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+45 passed, 3 warnings in 241.58s (0:04:01)
+2026-10-28 07:49:51 EDT

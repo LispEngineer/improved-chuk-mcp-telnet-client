@@ -1,0 +1,409 @@
+2026-10-28 07:56:27 EDT
+load 13.63 9.05 8.55 2/2973 3750937
+code: 09dbaa0 (detached worktree ~/src/chuk-mcp-telnet-client-m1-red); test file sha256 a1e5d56e2572e89d
+============================= test session starts ==============================
+platform linux -- Python 3.12.15, pytest-9.2.0, pluggy-1.7.0 -- ~/src/chuk-mcp-telnet-client-m1-red/.venv/bin/python
+rootdir: ~/src/chuk-mcp-telnet-client-m1-red
+configfile: pyproject.toml
+plugins: anyio-4.15.0
+collecting ... collected 10 items
+
+tests/test_m1_live_reader.py::test_idle_telnet_screen_is_current_over_stdio load 13.02 9.00 8.54 20/2991 3751306; LATER sent +2.00 s; read at +4.50 s
+FAILED
+tests/test_m1_live_reader.py::test_transcript_chunk_stamped_on_arrival load 13.94 9.33 8.65 19/2945 3751543; LATER chunk stamped +2.521 s from its send
+FAILED
+tests/test_m1_live_reader.py::test_wait_for_change_returns_after_settle FAILED
+tests/test_m1_live_reader.py::test_wait_for_change_sees_change_made_before_the_call FAILED
+tests/test_m1_live_reader.py::test_wait_for_change_times_out_unchanged FAILED
+tests/test_m1_live_reader.py::test_wait_for_change_pattern FAILED
+tests/test_m1_live_reader.py::test_wait_for_change_caps_timeout FAILED
+tests/test_m1_live_reader.py::test_close_while_reader_blocked_100_cycles FAILED
+tests/test_m1_live_reader.py::test_serial_close_while_reader_blocked FAILED
+tests/test_m1_live_reader.py::test_idle_serial_screen_is_current_over_stdio load 12.22 9.19 8.62 24/2966 3752304; LATER sent +1.50 s after connect; read +2.50 s after the send
+FAILED
+
+=================================== FAILURES ===================================
+________________ test_idle_telnet_screen_is_current_over_stdio _________________
+
+mcp = <test_m1_live_reader.Mcp object at 0x7f9fec2830e0>
+
+    def test_idle_telnet_screen_is_current_over_stdio(mcp):
+        """LATER arrives 2 s after the connect while the client makes NO call; a wait-0
+        screen read 2.5 s later must show it."""
+        srv = FakeTelnetServer([
+            ("FIRST", 0.0, b"FIRST\r\n$ "),
+            ("LATER", 2.0, b"\r\nLATER\r\n"),
+        ])
+        try:
+            _connect(mcp, "idle1", srv.port)
+            _sleep_until(srv.accepted_at + 4.5)  # no call during this stretch
+            assert "LATER" in srv.sent, "fake server did not send LATER"
+            r = mcp.tool("terminal_get_screen", {"session_id": "idle1"})
+            print(f"load {_load()}; LATER sent +{srv.sent['LATER'] - srv.accepted_at:.2f} s; "
+                  f"read at +{time.time() - srv.accepted_at:.2f} s")
+            assert "FIRST" in r["screen_text"]
+>           assert "LATER" in r["screen_text"], "wait-0 screen is stale: LATER not on it"
+E           AssertionError: wait-0 screen is stale: LATER not on it
+E           assert 'LATER' in 'FIRST\n$\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n'
+
+tests/test_m1_live_reader.py:239: AssertionError
+___________________ test_transcript_chunk_stamped_on_arrival ___________________
+
+mcp = <test_m1_live_reader.Mcp object at 0x7f9fec27ef30>
+log_dir = '/tmp/m1_live_reader_bkjs79u3'
+
+    def test_transcript_chunk_stamped_on_arrival(mcp, log_dir):
+        srv = FakeTelnetServer([
+            ("FIRST", 0.0, b"FIRST\r\n$ "),
+            ("LATER", 2.0, b"\r\nLATER\r\n"),
+        ])
+        try:
+            res = _connect(mcp, "stamp1", srv.port, timestamp_chunks=True)
+            _sleep_until(srv.accepted_at + 4.5)
+            # A call that gives even the 0.7.0 reader time, so the chunk is logged at all.
+            mcp.tool("terminal_get_screen", {"session_id": "stamp1", "wait_seconds": 1.0})
+            log_path = res["log_file"]
+            stamps = [(t, c) for t, c in _chunk_stamps(log_path) if "LATER" in c]
+            assert stamps, f"no STREAM DATA chunk with LATER in {log_path}"
+            lag = stamps[0][0] - srv.sent["LATER"]
+            print(f"load {_load()}; LATER chunk stamped {lag:+.3f} s from its send")
+>           assert -0.05 <= lag <= 0.2, f"chunk stamped {lag:+.3f} s from its send"
+E           AssertionError: chunk stamped +2.521 s from its send
+E           assert 2.520686626434326 <= 0.2
+
+tests/test_m1_live_reader.py:264: AssertionError
+__________________ test_wait_for_change_returns_after_settle ___________________
+
+mcp = <test_m1_live_reader.Mcp object at 0x7f9fec280710>
+
+    def test_wait_for_change_returns_after_settle(mcp):
+        """A burst L1, L2, L3 0.25 s apart (each gap under the 0.3 s settle): the wait
+        must return with the WHOLE burst, no sooner than settle after L3 and within
+        settle + 0.2 s of it."""
+        srv = FakeTelnetServer([
+            ("FIRST", 0.0, b"FIRST\r\n$ "),
+            ("L1", 3.0, b"\r\nL1"),
+            ("L2", 3.25, b"\r\nL2"),
+            ("L3", 3.5, b"\r\nL3\r\n"),
+        ])
+        try:
+            _connect(mcp, "wait1", srv.port)
+            base = mcp.tool("terminal_get_screen", {"session_id": "wait1"})
+            assert "L1" not in base["screen_text"]
+>           r = mcp.tool("terminal_wait_for_change", {
+                "session_id": "wait1", "timeout_seconds": 10, "settle_seconds": 0.3})
+
+tests/test_m1_live_reader.py:288: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <test_m1_live_reader.Mcp object at 0x7f9fec280710>
+name = 'terminal_wait_for_change'
+args = {'session_id': 'wait1', 'timeout_seconds': 10, 'settle_seconds': 0.3}
+deadline = 60.0
+
+    def tool(self, name, args, deadline=60.0):
+        r = self.call("tools/call", {"name": name, "arguments": args}, deadline=deadline)
+        if "error" in r:
+>           raise RuntimeError(f"tool {name} error: {r['error']}")
+E           RuntimeError: tool terminal_wait_for_change error: {'code': -32602, 'message': "Unknown tool: 'terminal_wait_for_change'. Available tools: list_sessions, serial_client, serial_close_session, serial_list_ports, serial_read_session, serial_send_break, serial_send_input, serial_set_speed, telnet_client, telnet_close_session..."}
+
+tests/test_m1_live_reader.py:164: RuntimeError
+____________ test_wait_for_change_sees_change_made_before_the_call _____________
+
+mcp = <test_m1_live_reader.Mcp object at 0x7f9fec2800e0>
+
+    def test_wait_for_change_sees_change_made_before_the_call(mcp):
+        """'Changed since the last screen read': a change that arrived while no call ran
+        returns at once (the screen settled long ago)."""
+        srv = FakeTelnetServer([
+            ("FIRST", 0.0, b"FIRST\r\n$ "),
+            ("LATER", 2.0, b"\r\nLATER\r\n"),
+        ])
+        try:
+            _connect(mcp, "wait2", srv.port)
+            mcp.tool("terminal_get_screen", {"session_id": "wait2"})
+            _sleep_until(srv.accepted_at + 4.0)
+            t0 = time.time()
+>           r = mcp.tool("terminal_wait_for_change", {
+                "session_id": "wait2", "timeout_seconds": 5, "settle_seconds": 0.3})
+
+tests/test_m1_live_reader.py:314: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <test_m1_live_reader.Mcp object at 0x7f9fec2800e0>
+name = 'terminal_wait_for_change'
+args = {'session_id': 'wait2', 'timeout_seconds': 5, 'settle_seconds': 0.3}
+deadline = 60.0
+
+    def tool(self, name, args, deadline=60.0):
+        r = self.call("tools/call", {"name": name, "arguments": args}, deadline=deadline)
+        if "error" in r:
+>           raise RuntimeError(f"tool {name} error: {r['error']}")
+E           RuntimeError: tool terminal_wait_for_change error: {'code': -32602, 'message': "Unknown tool: 'terminal_wait_for_change'. Available tools: list_sessions, serial_client, serial_close_session, serial_list_ports, serial_read_session, serial_send_break, serial_send_input, serial_set_speed, telnet_client, telnet_close_session..."}
+
+tests/test_m1_live_reader.py:164: RuntimeError
+___________________ test_wait_for_change_times_out_unchanged ___________________
+
+mcp = <test_m1_live_reader.Mcp object at 0x7f9fec280680>
+
+    def test_wait_for_change_times_out_unchanged(mcp):
+        srv = FakeTelnetServer([("FIRST", 0.0, b"FIRST\r\n$ ")])
+        try:
+            _connect(mcp, "wait3", srv.port)
+            mcp.tool("terminal_get_screen", {"session_id": "wait3"})
+            t0 = time.time()
+>           r = mcp.tool("terminal_wait_for_change", {
+                "session_id": "wait3", "timeout_seconds": 1.0, "settle_seconds": 0.3})
+
+tests/test_m1_live_reader.py:330: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <test_m1_live_reader.Mcp object at 0x7f9fec280680>
+name = 'terminal_wait_for_change'
+args = {'session_id': 'wait3', 'timeout_seconds': 1.0, 'settle_seconds': 0.3}
+deadline = 60.0
+
+    def tool(self, name, args, deadline=60.0):
+        r = self.call("tools/call", {"name": name, "arguments": args}, deadline=deadline)
+        if "error" in r:
+>           raise RuntimeError(f"tool {name} error: {r['error']}")
+E           RuntimeError: tool terminal_wait_for_change error: {'code': -32602, 'message': "Unknown tool: 'terminal_wait_for_change'. Available tools: list_sessions, serial_client, serial_close_session, serial_list_ports, serial_read_session, serial_send_break, serial_send_input, serial_set_speed, telnet_client, telnet_close_session..."}
+
+tests/test_m1_live_reader.py:164: RuntimeError
+_________________________ test_wait_for_change_pattern _________________________
+
+mcp = <test_m1_live_reader.Mcp object at 0x7f9fec281550>
+
+    def test_wait_for_change_pattern(mcp):
+        """With a pattern: an intermediate change does not end the wait; the pattern does
+        (after settle). A pattern that never appears times out with no match."""
+        srv = FakeTelnetServer([
+            ("FIRST", 0.0, b"FIRST\r\n$ "),
+            ("WORK", 2.5, b"\r\nWorking..."),
+            ("DONE", 4.0, b"\r\nDONE 42\r\n$ "),
+        ])
+        try:
+            _connect(mcp, "wait4", srv.port)
+            mcp.tool("terminal_get_screen", {"session_id": "wait4"})
+>           r = mcp.tool("terminal_wait_for_change", {
+                "session_id": "wait4", "timeout_seconds": 10, "settle_seconds": 0.3,
+                "pattern": r"DONE \d+"})
+
+tests/test_m1_live_reader.py:353: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <test_m1_live_reader.Mcp object at 0x7f9fec281550>
+name = 'terminal_wait_for_change'
+args = {'session_id': 'wait4', 'timeout_seconds': 10, 'settle_seconds': 0.3, 'pattern': 'DONE \\d+'}
+deadline = 60.0
+
+    def tool(self, name, args, deadline=60.0):
+        r = self.call("tools/call", {"name": name, "arguments": args}, deadline=deadline)
+        if "error" in r:
+>           raise RuntimeError(f"tool {name} error: {r['error']}")
+E           RuntimeError: tool terminal_wait_for_change error: {'code': -32602, 'message': "Unknown tool: 'terminal_wait_for_change'. Available tools: list_sessions, serial_client, serial_close_session, serial_list_ports, serial_read_session, serial_send_break, serial_send_input, serial_set_speed, telnet_client, telnet_close_session..."}
+
+tests/test_m1_live_reader.py:164: RuntimeError
+______________________ test_wait_for_change_caps_timeout _______________________
+
+    def test_wait_for_change_caps_timeout():
+        """The cap is enforced in code (a client cannot ask for an unbounded wait)."""
+        from chuk_mcp_telnet_client import tools
+    
+>       assert tools.TerminalDefaults.WAIT_FOR_CHANGE_MAX_TIMEOUT == 300.0
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: type object 'TerminalDefaults' has no attribute 'WAIT_FOR_CHANGE_MAX_TIMEOUT'
+
+tests/test_m1_live_reader.py:379: AttributeError
+__________________ test_close_while_reader_blocked_100_cycles __________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f9fe9f5cfe0>
+
+    def test_close_while_reader_blocked_100_cycles(monkeypatch):
+        """Each session's reader is blocked waiting for data that never comes; close must
+        end the thread (and free the socket) every time."""
+        from chuk_mcp_telnet_client import tools
+    
+        monkeypatch.setattr(tools.TerminalDefaults, "INITIAL_BANNER_WAIT", 0.0)
+    
+        srv = socket.socket()
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(128)
+        port = srv.getsockname()[1]
+        held = []
+        stop = threading.Event()
+    
+        def accept_loop():
+            srv.settimeout(0.2)
+            while not stop.is_set():
+                try:
+                    c, _ = srv.accept()
+                except (socket.timeout, OSError):
+                    continue
+                c.sendall(b"BANNER\r\n$ ")  # then silence: the reader blocks
+                held.append(c)
+    
+        acceptor = threading.Thread(target=accept_loop, daemon=True)
+        acceptor.start()
+    
+        # Every session object is kept: otherwise CPython frees an unclosed socket when the
+        # session is dropped, and a missing close() would not show in the descriptor count
+        # (sabotage S2 measured exactly that before this list existed).
+        sessions = []
+    
+        async def run():
+            worst_close = 0.0
+            for i in range(100):
+                sid = f"cycle{i}"
+                await tools.telnet_client_tool(
+                    host="127.0.0.1", port=port, commands=[], telnet_session_id=sid,
+                    enable_logging=False)
+                await asyncio.sleep(0.01)
+                alive = [t for t in _reader_threads() if t.name.endswith(sid)]
+                assert len(alive) == 1 and alive[0].is_alive(), f"cycle {i}: no live reader thread"
+                sessions.append(await tools._session_store.get(sid))
+                t0 = time.monotonic()
+                await tools.telnet_close_session(sid)
+                worst_close = max(worst_close, time.monotonic() - t0)
+                assert not alive[0].is_alive(), f"cycle {i}: reader still alive after close"
+                assert sessions[-1].telnet.get_socket() is None, f"cycle {i}: socket not closed"
+            return worst_close
+    
+        # Counted outside asyncio.run (whose loop holds its own descriptors), with the
+        # listening socket already open; the fake server's accepted ends are closed before
+        # the second count, so only the client's 100 sockets could make a difference.
+        fds_before = _fd_count()
+        try:
+>           worst_close = asyncio.run(run())
+                          ^^^^^^^^^^^^^^^^^^
+
+tests/test_m1_live_reader.py:454: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+../../.local/share/uv/python/cpython-3.12.15-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py:195: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+../../.local/share/uv/python/cpython-3.12.15-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../../.local/share/uv/python/cpython-3.12.15-linux-x86_64-gnu/lib/python3.12/asyncio/base_events.py:691: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    async def run():
+        worst_close = 0.0
+        for i in range(100):
+            sid = f"cycle{i}"
+            await tools.telnet_client_tool(
+                host="127.0.0.1", port=port, commands=[], telnet_session_id=sid,
+                enable_logging=False)
+            await asyncio.sleep(0.01)
+            alive = [t for t in _reader_threads() if t.name.endswith(sid)]
+>           assert len(alive) == 1 and alive[0].is_alive(), f"cycle {i}: no live reader thread"
+E           AssertionError: cycle 0: no live reader thread
+E           assert (0 == 1)
+E            +  where 0 = len([])
+
+tests/test_m1_live_reader.py:440: AssertionError
+____________________ test_serial_close_while_reader_blocked ____________________
+
+    def test_serial_close_while_reader_blocked():
+        from chuk_mcp_telnet_client import tools
+    
+        master, slave = pty.openpty()
+        tty.setraw(master)
+        tty.setraw(slave)
+        path = os.ttyname(slave)
+    
+        async def run():
+            await tools.serial_client_tool(port=path, commands=[], serial_session_id="sclose",
+                                           response_wait=0.0, enable_logging=False)
+            await asyncio.sleep(0.05)
+            alive = [t for t in _reader_threads() if t.name.endswith("sclose")]
+            assert len(alive) == 1 and alive[0].is_alive()
+            t0 = time.monotonic()
+            await tools.serial_close_session("sclose")
+            took = time.monotonic() - t0
+            assert not alive[0].is_alive()
+            return took
+    
+        try:
+>           took = asyncio.run(run())
+                   ^^^^^^^^^^^^^^^^^^
+
+tests/test_m1_live_reader.py:492: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+../../.local/share/uv/python/cpython-3.12.15-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py:195: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+../../.local/share/uv/python/cpython-3.12.15-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../../.local/share/uv/python/cpython-3.12.15-linux-x86_64-gnu/lib/python3.12/asyncio/base_events.py:691: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    async def run():
+        await tools.serial_client_tool(port=path, commands=[], serial_session_id="sclose",
+                                       response_wait=0.0, enable_logging=False)
+        await asyncio.sleep(0.05)
+        alive = [t for t in _reader_threads() if t.name.endswith("sclose")]
+>       assert len(alive) == 1 and alive[0].is_alive()
+E       assert (0 == 1)
+E        +  where 0 = len([])
+
+tests/test_m1_live_reader.py:484: AssertionError
+________________ test_idle_serial_screen_is_current_over_stdio _________________
+
+mcp = <test_m1_live_reader.Mcp object at 0x7f9fe9f5d010>
+
+    def test_idle_serial_screen_is_current_over_stdio(mcp):
+        master, slave = pty.openpty()
+        tty.setraw(master)
+        tty.setraw(slave)
+        path = os.ttyname(slave)
+        try:
+            # Nothing is written before the open: pyserial's open() discards pending input
+            # (serialposix.py, _reset_input_buffer), so a pre-open banner never arrives.
+            mcp.tool("serial_client", {
+                "port": path, "commands": [], "serial_session_id": "sidle", "response_wait": 0.5})
+            t_conn = time.time()
+            time.sleep(1.5)
+            os.write(master, b"\r\nLATER\r\n")
+            t_sent = time.time()
+            time.sleep(2.5)  # no call during this stretch
+            r = mcp.tool("terminal_get_screen", {"session_id": "sidle"})
+            print(f"load {_load()}; LATER sent +{t_sent - t_conn:.2f} s after connect; "
+                  f"read +{time.time() - t_sent:.2f} s after the send")
+            stale = "LATER" not in r["screen_text"]
+            # Control: a read that gives even the 0.7.0 reader time does see it, so a RED
+            # above is staleness, not a session that never receives anything.
+            r1 = mcp.tool("terminal_get_screen", {"session_id": "sidle", "wait_seconds": 1.0})
+            assert "LATER" in r1["screen_text"], "control: LATER never reached the screen"
+>           assert not stale, "wait-0 serial screen is stale: LATER not on it"
+E           AssertionError: wait-0 serial screen is stale: LATER not on it
+E           assert not True
+
+tests/test_m1_live_reader.py:529: AssertionError
+=============================== warnings summary ===============================
+tests/test_m1_live_reader.py::test_wait_for_change_caps_timeout
+  ~/src/chuk-mcp-telnet-client-m1-red/chuk_mcp_telnet_client/tools.py:12: DeprecationWarning: 'telnetlib' is deprecated and slated for removal in Python 3.13
+    import telnetlib  # nosec B401 - telnet is part of this MCP server
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/test_m1_live_reader.py::test_idle_telnet_screen_is_current_over_stdio
+FAILED tests/test_m1_live_reader.py::test_transcript_chunk_stamped_on_arrival
+FAILED tests/test_m1_live_reader.py::test_wait_for_change_returns_after_settle
+FAILED tests/test_m1_live_reader.py::test_wait_for_change_sees_change_made_before_the_call
+FAILED tests/test_m1_live_reader.py::test_wait_for_change_times_out_unchanged
+FAILED tests/test_m1_live_reader.py::test_wait_for_change_pattern - RuntimeEr...
+FAILED tests/test_m1_live_reader.py::test_wait_for_change_caps_timeout - Attr...
+FAILED tests/test_m1_live_reader.py::test_close_while_reader_blocked_100_cycles
+FAILED tests/test_m1_live_reader.py::test_serial_close_while_reader_blocked
+FAILED tests/test_m1_live_reader.py::test_idle_serial_screen_is_current_over_stdio
+======================== 10 failed, 1 warning in 26.41s ========================
+exit 1
+2026-10-28 07:56:54 EDT

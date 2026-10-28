@@ -6,6 +6,7 @@ Guarantees a single persistent log file per session without creating incremental
 
 import logging
 import os
+import threading
 from datetime import datetime
 from typing import Dict, Optional
 
@@ -41,6 +42,9 @@ class SessionLogger:
         self._session_files: Dict[str, str] = {}
         # Tracks timestamp mode per session
         self._timestamp_mode: Dict[str, bool] = {}
+        # The session reader threads and the tool calls append to the same transcript
+        # from different threads (v0.7.1); one entry is written at a time.
+        self._write_lock = threading.Lock()
 
     def get_session_log_path(self, session_id: str) -> Optional[str]:
         """
@@ -82,14 +86,14 @@ class SessionLogger:
         header = (
             f"{'='*80}\n"
             f"{protocol.upper()} SESSION LOG: {target}\n"
-            f"Server Version : chuk-mcp-terminal-client v0.6.0\n"
+            f"Server Version : chuk-mcp-terminal-client v0.7.1\n"
             f"Session ID     : {session_id}\n"
             f"Started At     : {now_str}\n"
             f"{'='*80}\n\n"
         )
         try:
             mode = "a" if os.path.exists(log_path) else "w"
-            with open(log_path, mode, encoding="utf-8", errors="replace") as f:
+            with self._write_lock, open(log_path, mode, encoding="utf-8", errors="replace") as f:
                 if mode == "a":
                     f.write(f"\n{header}")
                 else:
@@ -119,7 +123,7 @@ class SessionLogger:
 
         timestamp_chunks = self._timestamp_mode.get(session_id, False)
         try:
-            with open(log_path, "a", encoding="utf-8", errors="replace") as f:
+            with self._write_lock, open(log_path, "a", encoding="utf-8", errors="replace") as f:
                 if timestamp_chunks:
                     now_str = datetime.now().astimezone().isoformat()
                     entry = f"[{now_str}] >>> {command}\n{response}\n{'-'*40}\n"
@@ -142,17 +146,22 @@ class SessionLogger:
         chunk: str,
         host: Optional[str] = None,
         port: Optional[int] = None,
+        at: Optional[float] = None,
     ) -> Optional[str]:
-        """Log a stream chunk received asynchronously in background."""
+        """Log a stream chunk received asynchronously in background.
+
+        `at` (a time.time() value) is when the chunk arrived; the stamp uses it when given.
+        """
         log_path = self.get_session_log_path(session_id)
         if not log_path or not chunk:
             return None
 
         timestamp_chunks = self._timestamp_mode.get(session_id, False)
         try:
-            with open(log_path, "a", encoding="utf-8", errors="replace") as f:
+            with self._write_lock, open(log_path, "a", encoding="utf-8", errors="replace") as f:
                 if timestamp_chunks:
-                    now_str = datetime.now().astimezone().isoformat()
+                    when = datetime.fromtimestamp(at) if at is not None else datetime.now()
+                    now_str = when.astimezone().isoformat()
                     entry = f"[{now_str}] [STREAM DATA]\n{chunk}\n{'-'*40}\n"
                 else:
                     # Clean contiguous stream output
@@ -177,7 +186,7 @@ class SessionLogger:
 
         timestamp_chunks = self._timestamp_mode.get(session_id, False)
         try:
-            with open(log_path, "a", encoding="utf-8", errors="replace") as f:
+            with self._write_lock, open(log_path, "a", encoding="utf-8", errors="replace") as f:
                 if timestamp_chunks:
                     now_str = datetime.now().astimezone().isoformat()
                     entry = f"[{now_str}] >>> [INPUT] {input_text}\n{'-'*40}\n"
@@ -202,7 +211,7 @@ class SessionLogger:
         now_str = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
         entry = f"\n[CONFIG CHANGE ({now_str}): {change_description}]\n"
         try:
-            with open(log_path, "a", encoding="utf-8", errors="replace") as f:
+            with self._write_lock, open(log_path, "a", encoding="utf-8", errors="replace") as f:
                 f.write(entry)
             return log_path
         except Exception as e:
@@ -230,7 +239,7 @@ class SessionLogger:
             f"{'='*80}\n\n"
         )
         try:
-            with open(log_path, "a", encoding="utf-8", errors="replace") as f:
+            with self._write_lock, open(log_path, "a", encoding="utf-8", errors="replace") as f:
                 f.write(footer)
             return log_path
         except Exception as e:
