@@ -1583,7 +1583,10 @@ async def terminal_send_key(
     if session is None:
         raise ValueError(f"No active session found with ID '{session_id}'")
 
-    key_normalized = key.strip()
+    # A one-character key is sent as it is: stripping it would turn a space, a TAB or a
+    # CR into nothing (M1L, 2026-10-28: an agent typing a talk line lost every space).
+    # A longer name is stripped of stray spaces before the lookup, as before.
+    key_normalized = key if len(key) == 1 else key.strip()
     key_upper = key_normalized.upper()
     if key_upper in KEY_SEQUENCES:
         payload = KEY_SEQUENCES[key_upper]

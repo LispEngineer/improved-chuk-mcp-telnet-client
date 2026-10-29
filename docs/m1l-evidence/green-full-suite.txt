@@ -1,0 +1,8 @@
+2026-10-28 22:20:46 EDT
+3.66 3.19 2.68 4/2768 1309361
+5f836f8
++ working tree: tools.py one-character keys sent unstripped (git diff --stat:  1 file changed, 4 insertions(+), 1 deletion(-))
+    self._thread.setName('pySerial RFC 2217 reader thread for {}'.format(self._port))
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+60 passed, 3 warnings in 282.82s (0:04:42)

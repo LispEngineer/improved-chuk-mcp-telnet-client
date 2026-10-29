@@ -1,0 +1,18 @@
+2026-10-28 22:15:08 EDT
+4.15 2.83 2.40 4/2802 1274040
+5f836f8
+            got = srv.received_after(mark, len(text))
+>           assert got == text.encode(), f"the server received {got!r}"
+E           AssertionError: the server received b'M1Lab'
+E           assert b'M1Lab' == b'M1L a b'
+E             
+E             At index 3 diff: b'a' != b' '
+E             Use -v to get more diff
+
+tests/test_m1l_send_key_whitespace.py:109: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_m1l_send_key_whitespace.py::test_single_whitespace_key_is_sent[ - ]
+FAILED tests/test_m1l_send_key_whitespace.py::test_single_whitespace_key_is_sent[\t-\t]
+FAILED tests/test_m1l_send_key_whitespace.py::test_single_whitespace_key_is_sent[\r-\r]
+FAILED tests/test_m1l_send_key_whitespace.py::test_typing_a_line_with_spaces_key_by_key
+4 failed, 1 passed in 20.55s

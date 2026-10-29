@@ -34,12 +34,23 @@ A unified **Model Context Protocol (MCP)** Terminal Communications Server design
 * **MCP 180-Second (3-Minute) Timeout Immunity**: Both Telnet and Serial tools implement non-blocking execution windows (`max_wait_seconds`) with background stream accumulation and interim progress returns (`command_completed: false`), preventing client tool aborts during long operations exceeding 3 minutes.
 * **Clean, Human-Readable Transcript Logging (Default)**: Emits a clean, contiguous text stream identical to standard Unix `script` or `picocom` session logging (header, raw readable console text in the body, footer at exit).
 * **Single Persistent File Per Session**: Each session maintains exactly one persistent log file (`<session_id>.log`). Sequential commands, streaming output chunks, interactive inputs, and status updates append contiguously without generating fragmented suffix files (`_1.log`, `_2.log`). Reconnecting with an existing session ID safely appends with a clear session start block.
-* **Explicit Server Version Reporting**: The server reports its version (`server_version: "0.7.1"`) directly in tool return models and session log headers.
+* **Explicit Server Version Reporting**: The server reports its version (`server_version: "0.7.2"`) directly in tool return models and session log headers.
 * **Unified Session Directory (`list_sessions`)**: Enumerates all active Telnet and Serial sessions with protocol type, target string, uptime, and byte transfer counters.
 
 ---
 
 ## Release History & Changes
+
+### Version 0.7.2
+
+* **`terminal_send_key` sends a one-character whitespace key**: a space, a TAB
+  character or a CR given as `key` is sent as it is. Until now the key name was
+  stripped before the lookup, so `" "` became nothing and an agent typing a line
+  key by key lost every space (found by run M1L of vms-savage, 2026-10-28). A
+  longer key name is still stripped of stray spaces (`" ENTER "` is ENTER).
+  Test: `tests/test_m1l_send_key_whitespace.py`.
+* Version strings: pyproject, `__version__`, `server_version`, uv.lock and the
+  log header report `0.7.2`.
 
 ### Version 0.7.1
 * **Fixed: stale screens between tool calls.** In stdio mode (the default, and

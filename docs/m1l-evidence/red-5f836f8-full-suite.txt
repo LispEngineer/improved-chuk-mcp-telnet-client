@@ -1,0 +1,10 @@
+2026-10-28 22:15:35 EDT
+4.84 3.11 2.50 5/2784 1281038
+5f836f8
+(the fix was NOT applied: the edit had been refused; this is 5f836f8 unchanged plus the new test file)
+=========================== short test summary info ============================
+FAILED tests/test_m1l_send_key_whitespace.py::test_single_whitespace_key_is_sent[ - ]
+FAILED tests/test_m1l_send_key_whitespace.py::test_single_whitespace_key_is_sent[\t-\t]
+FAILED tests/test_m1l_send_key_whitespace.py::test_single_whitespace_key_is_sent[\r-\r]
+FAILED tests/test_m1l_send_key_whitespace.py::test_typing_a_line_with_spaces_key_by_key
+4 failed, 56 passed, 3 warnings in 294.93s (0:04:54)
