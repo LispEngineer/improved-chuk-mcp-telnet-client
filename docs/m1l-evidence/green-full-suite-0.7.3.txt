@@ -1,0 +1,7 @@
+2026-10-28 23:29:41 EDT
+2.69 2.63 2.76 6/2718 1723918
+a49d195
++ working tree: the LOGOUT-reply fix and the 0.7.3 version strings ( 8 files changed, 36 insertions(+), 17 deletions(-))
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+62 passed, 3 warnings in 288.83s (0:04:48)

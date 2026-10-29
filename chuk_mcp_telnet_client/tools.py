@@ -679,10 +679,17 @@ async def _wait_for_output(
 
     while time.time() - start_time < max_wait_seconds:
         if not session.is_active:
+            # The session ended (OpenVMS closes it right after LOGOUT's "logged out at").
+            # Return what followed start_index, as the other branches do. Returning
+            # unconsumed_output instead handed back everything received since the last
+            # telnet_send_input - all the screens a client had read with terminal_* calls
+            # (M1L, 2026-10-28: PT1's N14 36.5 KB LOGOUT reply, by this path in 0.7.1).
             with session.lock:
-                out = session.unconsumed_output
+                out = session.accumulated_output[start_index:]
                 session.unconsumed_output = ""
-                return out, True, None
+            # Report the prompt if the final bytes carry it, as the pattern branch would.
+            match = compiled_pattern.search(out) if compiled_pattern else None
+            return out, True, match.group(0) if match else None
 
         with session.lock:
             current_output = session.accumulated_output[start_index:]

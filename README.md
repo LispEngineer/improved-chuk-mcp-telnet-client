@@ -34,12 +34,24 @@ A unified **Model Context Protocol (MCP)** Terminal Communications Server design
 * **MCP 180-Second (3-Minute) Timeout Immunity**: Both Telnet and Serial tools implement non-blocking execution windows (`max_wait_seconds`) with background stream accumulation and interim progress returns (`command_completed: false`), preventing client tool aborts during long operations exceeding 3 minutes.
 * **Clean, Human-Readable Transcript Logging (Default)**: Emits a clean, contiguous text stream identical to standard Unix `script` or `picocom` session logging (header, raw readable console text in the body, footer at exit).
 * **Single Persistent File Per Session**: Each session maintains exactly one persistent log file (`<session_id>.log`). Sequential commands, streaming output chunks, interactive inputs, and status updates append contiguously without generating fragmented suffix files (`_1.log`, `_2.log`). Reconnecting with an existing session ID safely appends with a clear session start block.
-* **Explicit Server Version Reporting**: The server reports its version (`server_version: "0.7.2"`) directly in tool return models and session log headers.
+* **Explicit Server Version Reporting**: The server reports its version (`server_version: "0.7.3"`) directly in tool return models and session log headers.
 * **Unified Session Directory (`list_sessions`)**: Enumerates all active Telnet and Serial sessions with protocol type, target string, uptime, and byte transfer counters.
 
 ---
 
 ## Release History & Changes
+
+### Version 0.7.3
+
+* **A command that ends the session replies with what followed it**: when the
+  session closed during `telnet_send_input` (OpenVMS closes it right after
+  LOGOUT's "logged out at"), the reply was every byte received since the last
+  `telnet_send_input`, including every screen read with `terminal_*` calls.
+  This was PT1's 36.5 KB LOGOUT reply (N14), still present in 0.7.1 and 0.7.2.
+  The reply now holds only the output after the command, as the other paths do,
+  and reports the matched prompt (found by run M1L of vms-savage, 2026-10-28).
+  Test: `tests/test_m1l_logout_reply.py`.
+* Version strings report `0.7.3`.
 
 ### Version 0.7.2
 

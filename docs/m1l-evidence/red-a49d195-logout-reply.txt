@@ -1,0 +1,16 @@
+2026-10-28 23:29:02 EDT
+2.60 2.60 2.75 3/2705 1719883
+a49d195
+(the new test only; tools.py unchanged: )
+close_delay 0.0: reply 3286 bytes, prompt_matched None, session_active False
+Fclose_delay 1.0: reply 62 bytes, prompt_matched logged out at, session_active True
+mcp = <test_m1_live_reader.Mcp object at 0x7fa36d9bbfe0>, close_delay = 0.0
+    @pytest.mark.parametrize("close_delay", [0.0, 1.0])
+    def test_logout_reply_holds_only_what_followed(mcp, close_delay):
+        srv = LogoutServer(close_delay)
+            assert "SCREEN-0039" in scr["screen_text"]
+            print(f"close_delay {close_delay}: reply {len(resp)} bytes, prompt_matched {r['prompt_matched']}, "
+            assert "logged out at" in resp
+>           assert "SCREEN-" not in resp, f"the reply carries {resp.count('SCREEN-')} lines received before LOGOUT"
+E           assert 'SCREEN-' not in '\x1b[2;1HSC...28:16.55\r\n'
+1 failed, 1 passed in 6.22s
