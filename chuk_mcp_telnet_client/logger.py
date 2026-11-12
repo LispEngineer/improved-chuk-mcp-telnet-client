@@ -86,7 +86,7 @@ class SessionLogger:
         header = (
             f"{'='*80}\n"
             f"{protocol.upper()} SESSION LOG: {target}\n"
-            f"Server Version : chuk-mcp-terminal-client v0.7.3\n"
+            f"Server Version : chuk-mcp-terminal-client v0.8.0\n"
             f"Session ID     : {session_id}\n"
             f"Started At     : {now_str}\n"
             f"{'='*80}\n\n"
@@ -116,29 +116,8 @@ class SessionLogger:
         host: Optional[str] = None,
         port: Optional[int] = None,
     ) -> Optional[str]:
-        """Log a command and its response."""
-        log_path = self.get_session_log_path(session_id)
-        if not log_path:
-            return None
-
-        timestamp_chunks = self._timestamp_mode.get(session_id, False)
-        try:
-            with self._write_lock, open(log_path, "a", encoding="utf-8", errors="replace") as f:
-                if timestamp_chunks:
-                    now_str = datetime.now().astimezone().isoformat()
-                    entry = f"[{now_str}] >>> {command}\n{response}\n{'-'*40}\n"
-                else:
-                    # In clean transcript mode, if command echo wasn't already received in response,
-                    # ensure command appears naturally
-                    if response.startswith(command):
-                        entry = f"{response}\n"
-                    else:
-                        entry = f"{command}\n{response}\n"
-                f.write(entry)
-            return log_path
-        except Exception as e:
-            logger.warning(f"Failed writing command to log '{log_path}': {e}")
-            return None
+        """Inputs may contain credentials; output is logged only at ingestion."""
+        return self.get_session_log_path(session_id)
 
     def log_stream_chunk(
         self,
@@ -147,13 +126,14 @@ class SessionLogger:
         host: Optional[str] = None,
         port: Optional[int] = None,
         at: Optional[float] = None,
+        raw: bytes = b"",
     ) -> Optional[str]:
         """Log a stream chunk received asynchronously in background.
 
         `at` (a time.time() value) is when the chunk arrived; the stamp uses it when given.
         """
         log_path = self.get_session_log_path(session_id)
-        if not log_path or not chunk:
+        if not log_path or (not chunk and not raw):
             return None
 
         timestamp_chunks = self._timestamp_mode.get(session_id, False)
@@ -167,6 +147,9 @@ class SessionLogger:
                     # Clean contiguous stream output
                     entry = chunk
                 f.write(entry)
+                if raw:
+                    with open(log_path + ".raw", "ab") as raw_file:
+                        raw_file.write(raw)
             return log_path
         except Exception as e:
             logger.warning(f"Failed writing stream chunk to log '{log_path}': {e}")
@@ -179,24 +162,8 @@ class SessionLogger:
         host: Optional[str] = None,
         port: Optional[int] = None,
     ) -> Optional[str]:
-        """Log interactive input sent to session."""
-        log_path = self.get_session_log_path(session_id)
-        if not log_path:
-            return None
-
-        timestamp_chunks = self._timestamp_mode.get(session_id, False)
-        try:
-            with self._write_lock, open(log_path, "a", encoding="utf-8", errors="replace") as f:
-                if timestamp_chunks:
-                    now_str = datetime.now().astimezone().isoformat()
-                    entry = f"[{now_str}] >>> [INPUT] {input_text}\n{'-'*40}\n"
-                else:
-                    entry = f"{input_text}\n"
-                f.write(entry)
-            return log_path
-        except Exception as e:
-            logger.warning(f"Failed writing input to log '{log_path}': {e}")
-            return None
+        """Never persist input, which may be a password or secret command."""
+        return self.get_session_log_path(session_id)
 
     def log_config_change(
         self,

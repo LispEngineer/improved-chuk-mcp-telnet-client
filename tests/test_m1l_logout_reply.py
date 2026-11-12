@@ -1,20 +1,8 @@
-"""
-Run M1L (vms-savage, 2026-10-28): a telnet_send_input whose command ends the session
-(LOGOUT) must reply with the output that followed the command, not with every byte
-received since the last telnet_send_input.
+"""LOGOUT must retain unread screen traffic and never repeat delivered stream bytes.
 
-MEASURED live on PHVS5 with the installed 0.7.1 (vms-savage logs/m1l_mine_n1/m1l_mine_b.log,
-23:28): after SAVAGE was driven with terminal_send_key and terminal_wait_for_change, LOGOUT
-by telnet_send_input replied with all of SAVAGE's repaints since the previous
-telnet_send_input, then the logout line (prompt_matched null, session_active false). That
-is PT1's N14 symptom (a 36.5 KB LOGOUT reply), by another path: OpenVMS closes the
-connection right after "logged out at", the reader marks the session inactive, and
-_wait_for_output's inactive branch returned session.unconsumed_output, which only a
-telnet_send_input / telnet_read_session ever empties. The pattern branch (the close
-comes later) and the timeout branch already return the output since the command.
-
-Driven over stdio like tests/test_m1_live_reader.py (its Mcp class), against a local fake
-that sends a screenful of traffic, then answers LOGOUT and closes at once (or 1 s later).
+The v0.7.3 regression expected screen-only views to discard earlier output on
+LOGOUT. v0.8.0 intentionally changes that assertion: screen calls do not consume
+stream output. The explicit-drain variant preserves the no-duplicate intent.
 """
 
 import socket
@@ -87,7 +75,8 @@ def mcp(tmp_path):
 
 
 @pytest.mark.parametrize("close_delay", [0.0, 1.0])
-def test_logout_reply_holds_only_what_followed(mcp, close_delay):
+@pytest.mark.parametrize("drain_first", [False, True])
+def test_logout_reply_never_discards_or_repeats(mcp, close_delay, drain_first):
     srv = LogoutServer(close_delay)
     try:
         _connect(mcp, "lo", srv.port)
@@ -97,12 +86,21 @@ def test_logout_reply_holds_only_what_followed(mcp, close_delay):
         scr = mcp.tool("terminal_get_screen", {"session_id": "lo"})
         assert "SCREEN-0039" in scr["screen_text"]
         mcp.tool("terminal_send_key", {"session_id": "lo", "key": "X", "wait_seconds": 0.3})
+        prior = ""
+        if drain_first:
+            prior = mcp.tool("telnet_read_session", {"session_id": "lo", "max_wait_seconds": 0})["output"]
+            assert prior.count("SCREEN-") == 40
         r = mcp.tool("telnet_send_input", {"session_id": "lo", "input_text": "LOGOUT", "newline": "\r",
                                            "prompt_pattern": "logged out at", "max_wait_seconds": 10})
         resp = r["response"]
         print(f"close_delay {close_delay}: reply {len(resp)} bytes, prompt_matched {r['prompt_matched']}, "
               f"session_active {r['session_active']}")
         assert "logged out at" in resp
-        assert "SCREEN-" not in resp, f"the reply carries {resp.count('SCREEN-')} lines received before LOGOUT"
+        assert resp.count("SCREEN-") == (0 if drain_first else 40)
+        assert (prior + resp).count("SCREEN-") == 40
+        # The prompt ends mid-line: the remaining logout timestamp stays pending.
+        tail = mcp.tool("telnet_read_session", {"session_id": "lo", "max_wait_seconds": 0})["output"]
+        assert (resp + tail).count("logged out at") == 1
+        assert "23:28:16.55" in resp + tail
     finally:
         srv.stop()

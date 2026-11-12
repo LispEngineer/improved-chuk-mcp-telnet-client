@@ -85,12 +85,13 @@ class MockTelnetServer:
     async def stop(self):
         if self.server:
             self.server.close()
-            await self.server.wait_closed()
         for w in list(self.active_writers):
             try:
                 w.transport.close()
             except Exception:
                 pass
+        if self.server:
+            await self.server.wait_closed()
 
 
 @pytest.fixture
@@ -130,7 +131,8 @@ def test_telnet_connect_and_login(temp_log_dir):
             with open(res.log_file, "r") as f:
                 log_content = f.read()
             assert "TELNET SESSION LOG" in log_content
-            assert "SHOW TIME" in log_content
+            assert "4-SEP-2026" in log_content
+            assert "sysvax60" not in log_content
 
             await telnet_close_session(session_id)
         finally:
@@ -285,7 +287,7 @@ def test_telnet_single_log_file_per_session(temp_log_dir):
 
             # Verify that EXACTLY 1 log file exists in directory and no suffix files were created
             log_files = sorted(os.listdir(temp_log_dir))
-            assert log_files == [f"{session_id}.log"], f"Expected only {[f'{session_id}.log']}, got {log_files}"
+            assert log_files == [f"{session_id}.log", f"{session_id}.log.raw"]
             assert not any("_1.log" in f for f in log_files)
 
             # Verify log content includes all sequential operations
@@ -293,8 +295,9 @@ def test_telnet_single_log_file_per_session(temp_log_dir):
             with open(log_path, "r") as f:
                 content = f.read()
             assert "TELNET SESSION LOG" in content
-            assert "SHOW TIME" in content
-            assert "YES" in content
+            assert "4-SEP-2026" in content
+            assert "sysvax60" not in content
+            assert "Proceeding with task" in content
             assert "SESSION ENDED (Closed)" in content
 
             # 6. Reconnect with same session ID: should append to existing file, NOT create _1.log
@@ -310,7 +313,7 @@ def test_telnet_single_log_file_per_session(temp_log_dir):
 
             # Verify STILL exactly one file exists on disk
             log_files_after = sorted(os.listdir(temp_log_dir))
-            assert log_files_after == [f"{session_id}.log"], f"Expected only {[f'{session_id}.log']}, got {log_files_after}"
+            assert log_files_after == [f"{session_id}.log", f"{session_id}.log.raw"]
         finally:
             await server.stop()
 

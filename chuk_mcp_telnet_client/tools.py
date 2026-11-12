@@ -7,7 +7,11 @@ clean transcript disk logging without overwriting, and polymorphic multi-session
 """
 
 import asyncio
+import base64
+import codecs
+import inspect
 import logging
+import queue
 import re
 import select
 import socket
@@ -15,12 +19,15 @@ import telnetlib  # nosec B401 - telnet is part of this MCP server
 import threading
 import time
 import uuid
+import weakref
+from functools import wraps
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import List, Optional, Union
 
 import pyte
 import serial
+import serial.rfc2217
 import serial.tools.list_ports
 from chuk_mcp_server import tool
 from pydantic import BaseModel, ValidationError
@@ -141,11 +148,12 @@ class TelnetSession:
     created_at: float
     session_id: str
     logger: Optional[SessionLogger] = None
-    accumulated_output: str = ""
-    unconsumed_output: str = ""
+    pending_output: bytearray = field(default_factory=bytearray)
+    screen_decoder: object = field(default_factory=lambda: codecs.getincrementaldecoder("utf-8")("replace"))
+    output_decoder: object = field(default_factory=lambda: codecs.getincrementaldecoder("utf-8")("replace"))
+    transaction_bytes: Optional[bytearray] = None
     is_active: bool = True
     last_activity: float = field(default_factory=time.time)
-    current_cmd_start_index: int = 0
     # The reader runs in its own daemon thread (see _telnet_reader_thread), so the
     # socket is read when bytes arrive, not only while a tool call is being served.
     reader_thread: Optional[threading.Thread] = None
@@ -171,11 +179,6 @@ class TelnetSession:
         if self.stream is None:
             self.stream = pyte.Stream(self.screen)
             self.stream.use_utf8 = False
-        if self.accumulated_output and self.stream:
-            try:
-                self.stream.feed(self.accumulated_output)
-            except Exception as e:
-                logger.warning(f"Error feeding initial output to pyte screen: {e}")
 
     @property
     def session_type(self) -> str:
@@ -199,11 +202,12 @@ class SerialSession:
     created_at: float
     session_id: str
     logger: Optional[SessionLogger] = None
-    accumulated_output: str = ""
-    unconsumed_output: str = ""
+    pending_output: bytearray = field(default_factory=bytearray)
+    screen_decoder: object = field(default_factory=lambda: codecs.getincrementaldecoder("utf-8")("replace"))
+    output_decoder: object = field(default_factory=lambda: codecs.getincrementaldecoder("utf-8")("replace"))
+    transaction_bytes: Optional[bytearray] = None
     is_active: bool = True
     last_activity: float = field(default_factory=time.time)
-    current_cmd_start_index: int = 0
     # The reader runs in its own daemon thread (see _telnet_reader_thread), so the
     # socket is read when bytes arrive, not only while a tool call is being served.
     reader_thread: Optional[threading.Thread] = None
@@ -229,11 +233,6 @@ class SerialSession:
         if self.stream is None:
             self.stream = pyte.Stream(self.screen)
             self.stream.use_utf8 = False
-        if self.accumulated_output and self.stream:
-            try:
-                self.stream.feed(self.accumulated_output)
-            except Exception as e:
-                logger.warning(f"Error feeding initial output to pyte screen: {e}")
 
     @property
     def session_type(self) -> str:
@@ -297,10 +296,12 @@ def _ingest_chunk(
     arrived_at: float,
 ) -> None:
     """Append a received chunk to the buffers, feed pyte, and log it stamped on arrival."""
-    text = data.decode("utf-8", errors="ignore")
     with session.lock:
-        session.accumulated_output += text
-        session.unconsumed_output += text
+        text = session.screen_decoder.decode(data)
+        # Publish to stream consumers only after the transcript append completes.
+        if session.logger:
+            session.logger.log_stream_chunk(session.session_id, text, at=arrived_at, raw=data)
+        session.pending_output.extend(data)
         session.total_bytes_received += len(data)
         session.last_activity = time.time()
         session.last_rx_monotonic = time.monotonic()
@@ -311,12 +312,15 @@ def _ingest_chunk(
             except Exception as e:
                 logger.warning(f"Error feeding {session.session_type} text to pyte stream: {e}")
 
-    if session.logger:
-        session.logger.log_stream_chunk(
-            session_id=session.session_id,
-            chunk=text,
-            at=arrived_at,
-        )
+
+def _finish_reader(session):
+    with session.lock:
+        text = session.screen_decoder.decode(b"", final=True)
+        if text and session.stream:
+            session.stream.feed(text)
+        session.is_active = False
+        if text and session.logger:
+            session.logger.log_stream_chunk(session.session_id, text)
 
 
 def _telnet_reader_thread(session: "TelnetSession") -> None:
@@ -332,8 +336,7 @@ def _telnet_reader_thread(session: "TelnetSession") -> None:
             if not readable:
                 continue
             arrived_at = time.time()
-            if session.stop_event.wait(TerminalDefaults.READER_COALESCE_SECONDS):
-                break
+            session.stop_event.wait(TerminalDefaults.READER_COALESCE_SECONDS)
             try:
                 # read_very_eager() does not block. telnetlib answers option negotiation
                 # with its own sendall() inside it, hence the write lock.
@@ -348,7 +351,29 @@ def _telnet_reader_thread(session: "TelnetSession") -> None:
     except Exception as e:
         logger.error(f"Background telnet reader crashed for {session.session_id}: {e}")
     finally:
-        session.is_active = False
+        if not session.stop_event.is_set():
+            _finish_reader(session)
+
+
+def _read_serial_payload(ser, size):
+    """Drain RFC2217's receive queue even after its protocol thread reaches EOF.
+
+    pyserial 3.5 read(n) tests thread liveness before every queued byte and may
+    raise while payload remains buffered. Only our reader consumes this queue.
+    Local ports and socket:// continue through their public read interface.
+    """
+    if isinstance(ser, serial.rfc2217.Serial):
+        data = bytearray()
+        for _ in range(size):
+            try:
+                part = ser._read_buffer.get_nowait()
+            except queue.Empty:
+                break
+            if part is not None:
+                data.extend(part)
+        if data:
+            return bytes(data)
+    return ser.read(size)
 
 
 def _serial_reader_thread(session: "SerialSession") -> None:
@@ -359,7 +384,7 @@ def _serial_reader_thread(session: "SerialSession") -> None:
             try:
                 # Blocks for at most the port's timeout (0.1 s, set at open).
                 in_wait = getattr(ser, "in_waiting", 0)
-                data = ser.read(max(1, in_wait or 1))
+                data = _read_serial_payload(ser, max(1, in_wait or 1))
             except (serial.SerialException, OSError) as e:
                 if not session.stop_event.is_set():
                     logger.info(f"Serial port closed/disconnected for session {session.session_id}: {e}")
@@ -377,7 +402,7 @@ def _serial_reader_thread(session: "SerialSession") -> None:
             try:
                 more = getattr(ser, "in_waiting", 0)
                 if more:
-                    data += ser.read(more)
+                    data += _read_serial_payload(ser, more)
             except Exception:
                 pass  # the next read reports a failed port
             _answer_vt_queries(session, data)
@@ -385,7 +410,8 @@ def _serial_reader_thread(session: "SerialSession") -> None:
     except Exception as e:
         logger.error(f"Background serial reader crashed for {session.session_id}: {e}")
     finally:
-        session.is_active = False
+        if not session.stop_event.is_set():
+            _finish_reader(session)
 
 
 def _start_reader(session: Union["TelnetSession", "SerialSession"]) -> None:
@@ -404,37 +430,42 @@ def _start_reader(session: Union["TelnetSession", "SerialSession"]) -> None:
 
 
 def _stop_session_io(session: Union["TelnetSession", "SerialSession"]) -> None:
-    """Stop the reader thread (bounded join), then close the socket or port. Blocking.
+    """Stop/join, drain OS-buffered payload, then close. A busy reader requires retry.
 
-    The transport is closed only after the join, so the descriptor cannot be reused
-    while the reader still selects on it; shutdown()/cancel_read() wake a blocked reader.
+    No shutdown discards queued TCP bytes. A stop wakes the reader's coalescing
+    wait; select times out within 0.1 s and serial cancel_read wakes its read.
     """
-    session.is_active = False
     session.stop_event.set()
-
-    if isinstance(session, TelnetSession):
-        sock = session.telnet.get_socket()
-        if sock is not None:
-            try:
-                sock.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass  # already disconnected
-    else:
+    if isinstance(session, SerialSession):
         try:
             cancel = getattr(session.serial, "cancel_read", None)
             if cancel is not None:
                 cancel()
         except Exception:
-            pass  # not every pyserial backend has it; the read timeout still ends it
+            pass
 
     thread = session.reader_thread
     if thread is not None and thread is not threading.current_thread():
         thread.join(TerminalDefaults.READER_JOIN_SECONDS)
         if thread.is_alive():
-            logger.warning(
-                f"Reader thread for session {session.session_id} did not stop within "
-                f"{TerminalDefaults.READER_JOIN_SECONDS} s; closing the transport anyway"
+            raise RuntimeError(
+                f"Reader for {session.session_id} is still draining; retry close. "
+                "Session and unread output have been retained."
             )
+
+    # Include payload already buffered by the OS when close was requested.
+    try:
+        if isinstance(session, TelnetSession):
+            with session.write_lock:
+                data = session.telnet.read_very_eager()
+        else:
+            n = session.serial.in_waiting
+            data = _read_serial_payload(session.serial, n) if n else b""
+        if data:
+            _ingest_chunk(session, data, time.time())
+    except (OSError, EOFError, serial.SerialException, TypeError):
+        pass
+    _finish_reader(session)
 
     if isinstance(session, TelnetSession):
         try:
@@ -462,13 +493,13 @@ class SessionStore:
     async def store(self, session: Union[TelnetSession, SerialSession]) -> None:
         """Store a session and start its background reader thread.
 
-        A session already stored under the same ID (one that has died, since callers
-        only replace inactive sessions) has its reader stopped and its transport closed.
+        Session IDs cannot be replaced implicitly: unread output must first be
+        drained by a read or the explicit close reply.
         """
         old = self._sessions.get(session.session_id)
-        self._sessions[session.session_id] = session
         if old is not None and old is not session:
-            await asyncio.to_thread(_stop_session_io, old)
+            raise ValueError("Close the existing session before reusing its ID")
+        self._sessions[session.session_id] = session
         _start_reader(session)
 
     async def get(self, session_id: str) -> Optional[Union[TelnetSession, SerialSession]]:
@@ -477,9 +508,10 @@ class SessionStore:
 
     async def delete(self, session_id: str) -> None:
         """Delete a session, stop its background reader, and close port/socket."""
-        session = self._sessions.pop(session_id, None)
+        session = self._sessions.get(session_id)
         if session:
             await asyncio.to_thread(_stop_session_io, session)
+            self._sessions.pop(session_id, None)
 
             if session.logger:
                 session.logger.log_session_end(
@@ -521,34 +553,70 @@ def _create_negotiation_callback():
     return callback
 
 
+class PayloadTelnet(telnetlib.Telnet):
+    """Telnet negotiation with verbatim payload, including NUL and XON.
+
+    Unlike stdlib process_rawq, never blocks to finish a fragmented IAC and
+    never silently filters payload control bytes. IAC IAC is one payload FF.
+    """
+
+    def process_rawq(self):
+        cooked = bytearray()
+        sub = bytearray()
+        raw = self.rawq[self.irawq:]
+        self.rawq = b""
+        self.irawq = 0
+        for value in raw:
+            c = bytes([value])
+            if not self.iacseq:
+                if c == telnetlib.IAC:
+                    self.iacseq = c
+                else:
+                    (sub if self.sb else cooked).append(value)
+            elif len(self.iacseq) == 1:
+                if c in (telnetlib.DO, telnetlib.DONT, telnetlib.WILL, telnetlib.WONT):
+                    self.iacseq += c
+                    continue
+                self.iacseq = b""
+                if c == telnetlib.IAC:
+                    (sub if self.sb else cooked).append(value)
+                else:
+                    if c == telnetlib.SB:
+                        self.sb = 1
+                        self.sbdataq = b""
+                    elif c == telnetlib.SE:
+                        self.sb = 0
+                        self.sbdataq += bytes(sub)
+                        sub.clear()
+                    if self.option_callback:
+                        self.option_callback(self.sock, c, telnetlib.NOOPT)
+            else:
+                cmd = self.iacseq[1:2]
+                self.iacseq = b""
+                if self.option_callback:
+                    self.option_callback(self.sock, cmd, c)
+                elif cmd in (telnetlib.DO, telnetlib.DONT):
+                    self.sock.sendall(telnetlib.IAC + telnetlib.WONT + c)
+                else:
+                    self.sock.sendall(telnetlib.IAC + telnetlib.DONT + c)
+        self.cookedq += bytes(cooked)
+        self.sbdataq += bytes(sub)
+
+
 async def _connect_telnet(host: str, port: int) -> tuple[telnetlib.Telnet, str]:
-    """Establish a new telnet connection."""
-    tn = telnetlib.Telnet()  # nosec B312
+    """Open only; the one background reader owns every subsequent read."""
+    tn = PayloadTelnet()
     tn.set_option_negotiation_callback(_create_negotiation_callback())
-
+    opening = asyncio.create_task(asyncio.to_thread(tn.open, host, port, TerminalDefaults.CONNECTION_TIMEOUT))
     try:
-        await asyncio.to_thread(tn.open, host, port, TerminalDefaults.CONNECTION_TIMEOUT)
-    except Exception as ex:
-        raise RuntimeError(f"Failed to connect to Telnet server at {host}:{port}: {ex}")
-
-    await asyncio.sleep(TerminalDefaults.INITIAL_BANNER_WAIT)
-    initial_data = b""
-    try:
-        initial_data = await asyncio.to_thread(tn.read_very_eager)
-        if not initial_data:
-            try:
-                initial_data = await asyncio.wait_for(
-                    asyncio.to_thread(tn.read_some),
-                    timeout=TerminalDefaults.RESPONSE_WAIT,
-                )
-            except (asyncio.TimeoutError, TimeoutError, OSError):
-                initial_data = b""
-    except Exception as e:
-        logger.debug(f"Initial banner read failed or timed out: {e}")
-        initial_data = b""
-
-    initial_banner = initial_data.decode("utf-8", errors="ignore")
-    return tn, initial_banner
+        await asyncio.shield(opening)
+    except BaseException:
+        try:
+            await opening
+        finally:
+            tn.close()
+        raise
+    return tn, ""
 
 
 def _normalize_serial_target(port: str) -> str:
@@ -563,6 +631,20 @@ def _normalize_serial_target(port: str) -> str:
         if match:
             return f"rfc2217://{port_stripped}"
     return port_stripped
+
+
+async def _open_serial_safely(**kwargs):
+    opening = asyncio.create_task(asyncio.to_thread(serial.serial_for_url, **kwargs))
+    try:
+        return await asyncio.shield(opening)
+    except asyncio.CancelledError:
+        try:
+            opened = await opening
+        except Exception:
+            pass
+        else:
+            opened.close()
+        raise
 
 
 async def _connect_serial(
@@ -608,8 +690,7 @@ async def _connect_serial(
     last_ex = None
     for target in target_urls:
         try:
-            ser = await asyncio.to_thread(
-                serial.serial_for_url,
+            ser = await _open_serial_safely(
                 url=target,
                 baudrate=baudrate,
                 bytesize=bytesize_map.get(bytesize, serial.EIGHTBITS),
@@ -630,37 +711,91 @@ async def _connect_serial(
     if ser is None and last_ex:
         raise RuntimeError(f"Failed to open serial port at {port} ({baudrate} baud): {last_ex}")
 
-    await asyncio.sleep(response_wait)
-    initial_bytes = b""
-    try:
-        in_wait = getattr(ser, "in_waiting", 0)
-        if in_wait:
-            initial_bytes = await asyncio.to_thread(ser.read, in_wait)
-    except Exception:
-        pass
-
-    initial_banner = initial_bytes.decode("utf-8", errors="ignore")
-    return ser, initial_banner
+    return ser, ""
 
 
-def _strip_command_echo(response: str, command: str) -> str:
-    """Remove command echo from terminal response."""
-    variants = [
-        command,
-        command + "\r\n",
-        command + "\n",
-        "\r\n" + command,
-        "\n" + command,
-    ]
-    for variant in variants:
-        if response.startswith(variant):
-            return response[len(variant) :]
-    for variant in variants:
-        if variant in response:
-            parts = response.split(variant, 1)
-            if len(parts) > 1:
-                return parts[0] + parts[1]
-    return response
+class StreamText(str):
+    """Readable incremental UTF-8 view plus this delivery's authoritative bytes."""
+    def __new__(cls, text, raw=b""):
+        obj = super().__new__(cls, text)
+        obj.raw = raw
+        return obj
+
+    @property
+    def base64(self):
+        return base64.b64encode(self.raw).decode("ascii")
+
+
+def _take_pending(session, length=None, final=False):
+    """Caller holds session.lock. No await between dequeue and result assembly."""
+    length = len(session.pending_output) if length is None else length
+    raw = bytes(session.pending_output[:length])
+    del session.pending_output[:length]
+    if session.transaction_bytes is not None:
+        session.transaction_bytes.extend(raw)
+    text = session.output_decoder.decode(raw, final=final)
+    if final:
+        # Repeated EOF reads/close must be harmless.
+        session.output_decoder = codecs.getincrementaldecoder("utf-8")("replace")
+    return StreamText(text, raw)
+
+
+async def _close_and_drain(session):
+    # Await shutdown first: a cancelled close retains a drainable session in store.
+    await asyncio.to_thread(_stop_session_io, session)
+    if session.logger:
+        session.logger.log_session_end(session.session_id, total_bytes=session.total_bytes_received)
+    with session.lock:
+        out = _take_pending(session, final=True)
+    _session_store._sessions.pop(session.session_id, None)
+    return out
+
+
+_operation_locks = weakref.WeakValueDictionary()
+
+
+def _stream_operation(id_argument="session_id"):
+    """Serialize a session's consuming calls and restore output on cancellation.
+
+    The lock is separate from reader/write locks and never blocks screen calls.
+    It also covers the whole command batch, so cancelling its delay cannot drop
+    earlier batch responses that have not yet reached the caller.
+    """
+    def decorate(func):
+        signature = inspect.signature(func)
+        @wraps(func)
+        async def wrapped(*args, **kwargs):
+            bound = signature.bind(*args, **kwargs)
+            bound.apply_defaults()
+            sid = bound.arguments[id_argument]
+            if sid is None:
+                sid = f"{id_argument}_{uuid.uuid4().hex}"
+                bound.arguments[id_argument] = sid
+            pattern = bound.arguments.get("prompt_pattern")
+            if pattern:
+                re.compile(pattern)  # reject invalid expressions before sending input
+            lock = _operation_locks.setdefault(sid, asyncio.Lock())
+            async with lock:
+                session = await _session_store.get(sid)
+                state = session.output_decoder.getstate() if session else (b"", 0)
+                if session:
+                    session.transaction_bytes = bytearray()
+                try:
+                    return await func(*bound.args, **bound.kwargs)
+                except BaseException:
+                    session = await _session_store.get(sid)
+                    if session and session.transaction_bytes is not None:
+                        with session.lock:
+                            session.pending_output[:0] = session.transaction_bytes
+                            if state is not None:
+                                session.output_decoder.setstate(state)
+                    raise
+                finally:
+                    session = await _session_store.get(sid)
+                    if session:
+                        session.transaction_bytes = None
+        return wrapped
+    return decorate
 
 
 async def _wait_for_output(
@@ -670,52 +805,32 @@ async def _wait_for_output(
     prompt_pattern: Optional[str] = None,
     idle_timeout: Optional[float] = None,
 ) -> tuple[str, bool, Optional[str]]:
-    """
-    Wait for output to arrive or prompt pattern to match in session buffer.
-    Returns: (output_text, command_completed, matched_prompt_string)
-    """
-    start_time = time.time()
-    compiled_pattern = re.compile(prompt_pattern) if prompt_pattern else None
+    """Deliver the oldest pending prefix, retaining everything after a prompt.
 
-    while time.time() - start_time < max_wait_seconds:
-        if not session.is_active:
-            # The session ended (OpenVMS closes it right after LOGOUT's "logged out at").
-            # Return what followed start_index, as the other branches do. Returning
-            # unconsumed_output instead handed back everything received since the last
-            # telnet_send_input - all the screens a client had read with terminal_* calls
-            # (M1L, 2026-10-28: PT1's N14 36.5 KB LOGOUT reply, by this path in 0.7.1).
-            with session.lock:
-                out = session.accumulated_output[start_index:]
-                session.unconsumed_output = ""
-            # Report the prompt if the final bytes carry it, as the pattern branch would.
-            match = compiled_pattern.search(out) if compiled_pattern else None
-            return out, True, match.group(0) if match else None
-
+    start_index limits prompt matching to newly received output; delivery still
+    starts at the oldest pending byte, including bytes before that index.
+    Caller serializes consumers; all queue decisions/dequeues share the reader lock.
+    """
+    compiled = re.compile(prompt_pattern) if prompt_pattern else None
+    deadline = time.monotonic() + max(0.0, max_wait_seconds)
+    while True:
         with session.lock:
-            current_output = session.accumulated_output[start_index:]
-            last_activity = session.last_activity
-
-        if compiled_pattern:
-            match = compiled_pattern.search(current_output)
+            pending = bytes(session.pending_output)
+            # surrogateescape makes character offsets reversible to payload offsets;
+            # these private surrogate characters are never exposed through JSON.
+            current = pending.decode("utf-8", errors="surrogateescape")
+            offset = len(pending[:start_index].decode("utf-8", errors="surrogateescape"))
+            match = compiled.search(current, offset) if compiled else None
             if match:
-                matched_str = match.group(0)
-                with session.lock:
-                    session.unconsumed_output = ""
-                return current_output, True, matched_str
-
-        if idle_timeout and (time.time() - last_activity >= idle_timeout):
-            if current_output:
-                with session.lock:
-                    session.unconsumed_output = ""
-                return current_output, True, None
-
-        await asyncio.sleep(0.1)
-
-    # Reached max_wait_seconds
-    with session.lock:
-        interim_output = session.accumulated_output[start_index:]
-        session.unconsumed_output = ""
-    return interim_output, False, None
+                length = len(current[:match.end()].encode("utf-8", errors="surrogateescape"))
+                return _take_pending(session, length), True, match.group(0)
+            if not session.is_active:
+                return _take_pending(session, final=True), True, None
+            if idle_timeout is not None and pending and time.monotonic() - session.last_rx_monotonic >= idle_timeout:
+                return _take_pending(session), True, None
+            if time.monotonic() >= deadline:
+                return _take_pending(session), False, None
+        await asyncio.sleep(min(0.02, max(0.0, deadline - time.monotonic())))
 
 
 # ============================================================================
@@ -724,6 +839,7 @@ async def _wait_for_output(
 
 
 @tool(name="telnet_client")
+@_stream_operation("telnet_session_id")
 async def telnet_client_tool(
     host: str,
     port: int,
@@ -745,7 +861,9 @@ async def telnet_client_tool(
     initial_banner = ""
     session_logger = SessionLogger(log_dir) if enable_logging else None
 
-    if session is None or not session.is_active:
+    if session is not None and not session.is_active:
+        raise ValueError("Session ended; read remaining output and close it before reconnecting")
+    if session is None:
         tn, initial_banner = await _connect_telnet(host, port)
         session = TelnetSession(
             telnet=tn,
@@ -754,9 +872,6 @@ async def telnet_client_tool(
             created_at=time.time(),
             session_id=actual_session_id,
             logger=session_logger,
-            accumulated_output=initial_banner,
-            unconsumed_output="",
-            total_bytes_received=len(initial_banner.encode("utf-8")),
         )
         if session_logger:
             session_logger.log_session_start(
@@ -768,20 +883,20 @@ async def telnet_client_tool(
             )
         await _session_store.store(session)
 
-        # If a prompt pattern is provided for a new session, ensure the initial prompt
-        # (e.g. 'Username: ' or shell prompt) has arrived before sending commands.
-        if prompt_pattern and commands:
-            compiled = re.compile(prompt_pattern)
-            if not compiled.search(session.accumulated_output):
-                await _wait_for_output(
-                    session=session,
-                    start_index=0,
-                    max_wait_seconds=min(max_wait_seconds, 15.0),
-                    prompt_pattern=prompt_pattern,
-                )
+        session.transaction_bytes = bytearray()
+        banner, _, _ = await _wait_for_output(
+            session, max_wait_seconds=response_wait, prompt_pattern=prompt_pattern,
+            idle_timeout=0.1,
+        )
+        initial_banner = banner
     else:
         if session.logger is None and session_logger:
-            session.logger = session_logger
+            with session.lock:
+                session_logger.log_session_start(
+                    session_id=actual_session_id, target=session.target,
+                    protocol=session.session_type.upper(), timestamp_chunks=timestamp_chunks,
+                )
+                session.logger = session_logger
         elif session.logger and timestamp_chunks:
             session.logger._timestamp_mode[actual_session_id] = True
 
@@ -791,15 +906,14 @@ async def telnet_client_tool(
 
     for i, cmd in enumerate(commands):
         with session.lock:
-            cmd_start_index = len(session.accumulated_output)
-            session.current_cmd_start_index = cmd_start_index
+            cmd_start_index = len(session.pending_output)
 
         cmd_bytes = (cmd + newline).encode("utf-8")
         try:
             await asyncio.to_thread(_write_transport, session, cmd_bytes)
         except Exception as e:
-            logger.error(f"Failed to write command '{cmd}' to session {actual_session_id}: {e}")
-            session.is_active = False
+            logger.error(f"Failed to write command to session {actual_session_id}: {type(e).__name__}")
+            all_completed = False
             break
 
         out, completed, prompt_match = await _wait_for_output(
@@ -809,15 +923,8 @@ async def telnet_client_tool(
             prompt_pattern=prompt_pattern,
         )
 
-        cleaned_response = _strip_command_echo(out, cmd)
-        responses.append(CommandResponse(command=cmd, response=cleaned_response))
-
-        if session.logger:
-            session.logger.log_command(
-                session_id=actual_session_id,
-                command=cmd,
-                response=cleaned_response,
-            )
+        cleaned_response = out
+        responses.append(CommandResponse(command=cmd, response=cleaned_response, raw_base64=out.base64))
 
         if not completed:
             all_completed = False
@@ -829,8 +936,9 @@ async def telnet_client_tool(
 
     log_path = session.logger.get_session_log_path(actual_session_id) if session.logger else None
 
+    final_output = StreamText("")
     if close_session:
-        await _session_store.delete(actual_session_id)
+        final_output = await _close_and_drain(session)
         is_active = False
     else:
         is_active = session.is_active
@@ -839,6 +947,9 @@ async def telnet_client_tool(
         host=host,
         port=port,
         initial_banner=initial_banner,
+        initial_banner_raw_base64=initial_banner.base64 if isinstance(initial_banner, StreamText) else "",
+        final_output=final_output,
+        final_output_raw_base64=final_output.base64,
         responses=responses,
         session_id=actual_session_id,
         session_active=is_active,
@@ -849,6 +960,7 @@ async def telnet_client_tool(
 
 
 @tool(name="telnet_read_session")
+@_stream_operation("session_id")
 async def telnet_read_session(
     session_id: str,
     max_wait_seconds: float = TerminalDefaults.MAX_WAIT_SECONDS,
@@ -861,8 +973,7 @@ async def telnet_read_session(
     if session is None or not isinstance(session, TelnetSession):
         raise ValueError(f"No active Telnet session found with ID '{session_id}'")
 
-    with session.lock:
-        start_index = session.current_cmd_start_index if return_full_buffer else len(session.accumulated_output) - len(session.unconsumed_output)
+    start_index = 0
 
     out, completed, prompt_match = await _wait_for_output(
         session=session,
@@ -879,7 +990,8 @@ async def telnet_read_session(
         host=session.host,
         port=session.port,
         output=out,
-        new_bytes_count=len(out.encode("utf-8")),
+        new_bytes_count=len(out.raw),
+        raw_base64=out.base64,
         total_bytes_received=session.total_bytes_received,
         command_completed=completed,
         prompt_matched=prompt_match,
@@ -889,6 +1001,7 @@ async def telnet_read_session(
 
 
 @tool(name="telnet_send_input")
+@_stream_operation("session_id")
 async def telnet_send_input(
     session_id: str,
     input_text: str,
@@ -903,14 +1016,11 @@ async def telnet_send_input(
         raise ValueError(f"No active Telnet session found with ID '{session_id}'")
 
     with session.lock:
-        start_index = len(session.accumulated_output)
-        session.current_cmd_start_index = start_index
+        start_index = len(session.pending_output)
 
     payload = input_text.encode("utf-8") if raw else (input_text + newline).encode("utf-8")
     await asyncio.to_thread(_write_transport, session, payload)
 
-    if session.logger:
-        session.logger.log_input(session_id=session_id, input_text=input_text)
 
     out, completed, prompt_match = await _wait_for_output(
         session=session,
@@ -925,6 +1035,7 @@ async def telnet_send_input(
         session_id=session_id,
         input_sent=input_text,
         response=out,
+        raw_base64=out.base64,
         command_completed=completed,
         prompt_matched=prompt_match,
         session_active=session.is_active,
@@ -933,12 +1044,14 @@ async def telnet_send_input(
 
 
 @tool(name="telnet_close_session")
+@_stream_operation("session_id")
 async def telnet_close_session(session_id: str) -> SessionCloseResponse:
     """Close an active Telnet session."""
     session = await _session_store.get(session_id)
     if session:
-        await _session_store.delete(session_id)
-        return SessionCloseResponse(success=True, message=f"Telnet session '{session_id}' closed successfully.")
+        out = await _close_and_drain(session)
+        return SessionCloseResponse(success=True, message=f"Telnet session '{session_id}' closed successfully.",
+                                    output=out, raw_base64=out.base64)
     return SessionCloseResponse(success=False, message=f"No active session found with ID '{session_id}'.")
 
 
@@ -948,6 +1061,7 @@ async def telnet_close_session(session_id: str) -> SessionCloseResponse:
 
 
 @tool(name="serial_client")
+@_stream_operation("serial_session_id")
 async def serial_client_tool(
     port: str,
     commands: list[str],
@@ -974,7 +1088,9 @@ async def serial_client_tool(
     initial_banner = ""
     session_logger = SessionLogger(log_dir) if enable_logging else None
 
-    if session is None or not session.is_active:
+    if session is not None and not session.is_active:
+        raise ValueError("Session ended; read remaining output and close it before reconnecting")
+    if session is None:
         ser, initial_banner = await _connect_serial(
             port=port,
             baudrate=baudrate,
@@ -995,9 +1111,6 @@ async def serial_client_tool(
             created_at=time.time(),
             session_id=actual_session_id,
             logger=session_logger,
-            accumulated_output=initial_banner,
-            unconsumed_output="",
-            total_bytes_received=len(initial_banner.encode("utf-8")),
         )
         if session_logger:
             sb = int(stopbits) if stopbits == int(stopbits) else stopbits
@@ -1010,9 +1123,20 @@ async def serial_client_tool(
                 timestamp_chunks=timestamp_chunks,
             )
         await _session_store.store(session)
+        session.transaction_bytes = bytearray()
+        banner, _, _ = await _wait_for_output(
+            session, max_wait_seconds=response_wait, prompt_pattern=prompt_pattern,
+            idle_timeout=0.1,
+        )
+        initial_banner = banner
     else:
         if session.logger is None and session_logger:
-            session.logger = session_logger
+            with session.lock:
+                session_logger.log_session_start(
+                    session_id=actual_session_id, target=session.target,
+                    protocol=session.session_type.upper(), timestamp_chunks=timestamp_chunks,
+                )
+                session.logger = session_logger
         elif session.logger and timestamp_chunks:
             session.logger._timestamp_mode[actual_session_id] = True
 
@@ -1022,15 +1146,14 @@ async def serial_client_tool(
 
     for i, cmd in enumerate(commands):
         with session.lock:
-            cmd_start_index = len(session.accumulated_output)
-            session.current_cmd_start_index = cmd_start_index
+            cmd_start_index = len(session.pending_output)
 
         cmd_bytes = (cmd + newline).encode("utf-8")
         try:
             await asyncio.to_thread(_write_transport, session, cmd_bytes, True)
         except Exception as e:
-            logger.error(f"Failed to write command '{cmd}' to serial session {actual_session_id}: {e}")
-            session.is_active = False
+            logger.error(f"Failed to write command to serial session {actual_session_id}: {type(e).__name__}")
+            all_completed = False
             break
 
         out, completed, prompt_match = await _wait_for_output(
@@ -1040,15 +1163,8 @@ async def serial_client_tool(
             prompt_pattern=prompt_pattern,
         )
 
-        cleaned_response = _strip_command_echo(out, cmd)
-        responses.append(CommandResponse(command=cmd, response=cleaned_response))
-
-        if session.logger:
-            session.logger.log_command(
-                session_id=actual_session_id,
-                command=cmd,
-                response=cleaned_response,
-            )
+        cleaned_response = out
+        responses.append(CommandResponse(command=cmd, response=cleaned_response, raw_base64=out.base64))
 
         if not completed:
             all_completed = False
@@ -1060,8 +1176,9 @@ async def serial_client_tool(
 
     log_path = session.logger.get_session_log_path(actual_session_id) if session.logger else None
 
+    final_output = StreamText("")
     if close_session:
-        await _session_store.delete(actual_session_id)
+        final_output = await _close_and_drain(session)
         is_active = False
     else:
         is_active = session.is_active
@@ -1070,6 +1187,9 @@ async def serial_client_tool(
         port=port,
         baudrate=session.baudrate,
         initial_banner=initial_banner,
+        initial_banner_raw_base64=initial_banner.base64 if isinstance(initial_banner, StreamText) else "",
+        final_output=final_output,
+        final_output_raw_base64=final_output.base64,
         responses=responses,
         session_id=actual_session_id,
         session_active=is_active,
@@ -1080,6 +1200,7 @@ async def serial_client_tool(
 
 
 @tool(name="serial_read_session")
+@_stream_operation("session_id")
 async def serial_read_session(
     session_id: str,
     max_wait_seconds: float = TerminalDefaults.MAX_WAIT_SECONDS,
@@ -1092,8 +1213,7 @@ async def serial_read_session(
     if session is None or not isinstance(session, SerialSession):
         raise ValueError(f"No active Serial session found with ID '{session_id}'")
 
-    with session.lock:
-        start_index = session.current_cmd_start_index if return_full_buffer else len(session.accumulated_output) - len(session.unconsumed_output)
+    start_index = 0
 
     out, completed, prompt_match = await _wait_for_output(
         session=session,
@@ -1110,7 +1230,8 @@ async def serial_read_session(
         port=session.port,
         baudrate=session.baudrate,
         output=out,
-        new_bytes_count=len(out.encode("utf-8")),
+        new_bytes_count=len(out.raw),
+        raw_base64=out.base64,
         total_bytes_received=session.total_bytes_received,
         command_completed=completed,
         prompt_matched=prompt_match,
@@ -1120,6 +1241,7 @@ async def serial_read_session(
 
 
 @tool(name="serial_send_input")
+@_stream_operation("session_id")
 async def serial_send_input(
     session_id: str,
     input_text: str,
@@ -1134,14 +1256,11 @@ async def serial_send_input(
         raise ValueError(f"No active Serial session found with ID '{session_id}'")
 
     with session.lock:
-        start_index = len(session.accumulated_output)
-        session.current_cmd_start_index = start_index
+        start_index = len(session.pending_output)
 
     payload = input_text.encode("utf-8") if raw else (input_text + newline).encode("utf-8")
     await asyncio.to_thread(_write_transport, session, payload, True)
 
-    if session.logger:
-        session.logger.log_input(session_id=session_id, input_text=input_text)
 
     out, completed, prompt_match = await _wait_for_output(
         session=session,
@@ -1156,6 +1275,7 @@ async def serial_send_input(
         session_id=session_id,
         input_sent=input_text,
         response=out,
+        raw_base64=out.base64,
         command_completed=completed,
         prompt_matched=prompt_match,
         session_active=session.is_active,
@@ -1164,6 +1284,7 @@ async def serial_send_input(
 
 
 @tool(name="serial_send_break")
+@_stream_operation("session_id")
 async def serial_send_break(
     session_id: str,
     duration: float = 0.25,
@@ -1191,8 +1312,7 @@ async def serial_send_break(
         )
 
     with session.lock:
-        start_index = len(session.accumulated_output)
-        session.current_cmd_start_index = start_index
+        start_index = len(session.pending_output)
 
     try:
         def _send_break() -> None:
@@ -1224,6 +1344,7 @@ async def serial_send_break(
         success=completed or bool(out),
         prompt_matched=prompt_match,
         output=out,
+        raw_base64=out.base64,
         message="Break sent successfully.",
     )
 
@@ -1332,12 +1453,14 @@ async def serial_list_ports() -> SerialListPortsOutput:
 
 
 @tool(name="serial_close_session")
+@_stream_operation("session_id")
 async def serial_close_session(session_id: str) -> SessionCloseResponse:
     """Close an active Serial session."""
     session = await _session_store.get(session_id)
     if session:
-        await _session_store.delete(session_id)
-        return SessionCloseResponse(success=True, message=f"Serial session '{session_id}' closed successfully.")
+        out = await _close_and_drain(session)
+        return SessionCloseResponse(success=True, message=f"Serial session '{session_id}' closed successfully.",
+                                    output=out, raw_base64=out.base64)
     return SessionCloseResponse(success=False, message=f"No active session found with ID '{session_id}'.")
 
 
@@ -1608,8 +1731,6 @@ async def terminal_send_key(
     else:
         raise ValueError(f"Unsupported session type for session '{session_id}'")
 
-    if session.logger:
-        session.logger.log_input(session_id=session_id, input_text=f"KEY:{key_normalized}")
 
     if wait_seconds > 0:
         await asyncio.sleep(wait_seconds)

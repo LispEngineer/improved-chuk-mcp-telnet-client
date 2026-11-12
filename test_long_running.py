@@ -43,7 +43,6 @@ async def main():
         commands=["SYSTEM", "DPFVAX60", "@LONG_TASK_TEST.COM"],
         telnet_session_id=SESSION_ID,
         max_wait_seconds=12.0,
-        prompt_pattern=r"(?m)^\$ ",
         close_session=False,
     )
 
@@ -90,19 +89,16 @@ async def main():
     print(f"  -> Matched Prompt: {res3.prompt_matched}")
     print(f"  -> Output received:\n{res3.output}")
 
-    # 6. Verify full accumulated history
-    print("\n[Step 5] Fetching full buffer history with return_full_buffer=True...")
+    # 6. v0.8.0: delivered output is never replayed. Aggregate actual replies.
+    combined = last_cmd_resp + res2.output + res3.output
+    assert "Stage 1 complete" in combined
+    assert "Stage 2 complete" in combined
+    assert "Stage 3 complete" in combined
+    assert "FINISHED SUCCESSFULLY" in combined
     res_full = await telnet_read_session(
-        session_id=SESSION_ID,
-        max_wait_seconds=1.0,
-        return_full_buffer=True,
+        session_id=SESSION_ID, max_wait_seconds=0, return_full_buffer=True,
     )
-    print(f"  -> Full Accumulated Output:\n{res_full.output}")
-
-    assert "Stage 1 complete" in res_full.output
-    assert "Stage 2 complete" in res_full.output
-    assert "Stage 3 complete" in res_full.output
-    assert "FINISHED SUCCESSFULLY" in res_full.output
+    assert res_full.output == ""
 
     # 7. Test interactive input tool
     print("\n[Step 6] Testing telnet_send_input with 'SHOW TIME'...")
@@ -127,8 +123,8 @@ async def main():
             log_content = f.read()
         print("  -> First 300 chars of log:\n" + log_content[:300])
         assert "TELNET SESSION LOG" in log_content
-        assert "SYSTEM" in log_content
-        assert "LONG_TASK_TEST" in log_content
+        assert "FINISHED SUCCESSFULLY" in log_content
+        assert "DPFVAX60" not in log_content
         assert "SESSION ENDED" in log_content
         print("  -> [PASS] Log file verified complete with ISO timestamps!")
 

@@ -201,7 +201,8 @@ def test_serial_operation_exceeding_3_minutes(temp_log_dir):
             with open(log_file, "r") as f:
                 log_text = f.read()
 
-            assert "BACKUP/IMAGE DKA0: BULKDATA.BCK" in log_text
+            assert "BACKUP-I-STARTING" in log_text
+            assert "sysvax60" not in log_text
             assert "%BACKUP-S-COPIED" in log_text
             assert "185000 records copied" in log_text
 

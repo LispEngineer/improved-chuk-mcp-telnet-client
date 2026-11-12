@@ -18,13 +18,17 @@ class TelnetClientInput(BaseModel):
 class CommandResponse(BaseModel):
     command: str
     response: str
+    raw_base64: str = ""
 
 
 class TelnetClientOutput(BaseModel):
-    server_version: str = "0.7.3"
+    server_version: str = "0.8.0"
     host: str
     port: int
     initial_banner: str
+    initial_banner_raw_base64: str = ""
+    final_output: str = ""
+    final_output_raw_base64: str = ""
     responses: List[CommandResponse]
     session_id: str
     session_active: bool
@@ -38,6 +42,7 @@ class TelnetReadSessionOutput(BaseModel):
     host: str
     port: int
     output: str
+    raw_base64: str = ""
     new_bytes_count: int
     total_bytes_received: int
     command_completed: bool
@@ -50,6 +55,7 @@ class TelnetSendInputOutput(BaseModel):
     session_id: str
     input_sent: str
     response: str
+    raw_base64: str = ""
     command_completed: bool
     prompt_matched: Optional[str] = None
     session_active: bool
@@ -74,10 +80,13 @@ class SerialClientInput(BaseModel):
 
 
 class SerialClientOutput(BaseModel):
-    server_version: str = "0.7.3"
+    server_version: str = "0.8.0"
     port: str
     baudrate: int
     initial_banner: str
+    initial_banner_raw_base64: str = ""
+    final_output: str = ""
+    final_output_raw_base64: str = ""
     responses: List[CommandResponse]
     session_id: str
     session_active: bool
@@ -91,6 +100,7 @@ class SerialReadSessionOutput(BaseModel):
     port: str
     baudrate: int
     output: str
+    raw_base64: str = ""
     new_bytes_count: int
     total_bytes_received: int
     command_completed: bool
@@ -103,6 +113,7 @@ class SerialSendInputOutput(BaseModel):
     session_id: str
     input_sent: str
     response: str
+    raw_base64: str = ""
     command_completed: bool
     prompt_matched: Optional[str] = None
     session_active: bool
@@ -114,6 +125,7 @@ class SerialSendBreakOutput(BaseModel):
     success: bool
     prompt_matched: Optional[str] = None
     output: str
+    raw_base64: str = ""
     message: str
 
 
@@ -156,13 +168,13 @@ class SessionInfo(BaseModel):
     age_seconds: float
     is_active: bool
     total_bytes_received: int
-    server_version: str = "0.7.3"
+    server_version: str = "0.8.0"
 
 
 class SessionListResponse(BaseModel):
     """Response for listing all active sessions."""
 
-    server_version: str = "0.7.3"
+    server_version: str = "0.8.0"
     active_sessions: int
     sessions: Dict[str, SessionInfo]
     note: str = (
@@ -171,7 +183,9 @@ class SessionListResponse(BaseModel):
 
 
 class SessionCloseResponse(BaseModel):
-    """Response for closing a session."""
+    """Final unread stream delivery at the explicit close boundary."""
+    output: str = ""
+    raw_base64: str = ""
 
     success: bool
     message: str
@@ -195,7 +209,7 @@ class TerminalScreenOutput(BaseModel):
     screen_text: str
     annotated_text: str
     highlighted_lines: List[int]
-    server_version: str = "0.7.3"
+    server_version: str = "0.8.0"
 
 
 class TerminalWaitForChangeOutput(BaseModel):
@@ -217,7 +231,7 @@ class TerminalWaitForChangeOutput(BaseModel):
     screen_text: str
     annotated_text: str
     highlighted_lines: List[int]
-    server_version: str = "0.7.3"
+    server_version: str = "0.8.0"
 
 
 class TerminalSendKeyOutput(BaseModel):
@@ -233,7 +247,7 @@ class TerminalSendKeyOutput(BaseModel):
     cursor_row: Optional[int] = None
     cursor_col: Optional[int] = None
     cursor_visible: Optional[bool] = None
-    server_version: str = "0.7.3"
+    server_version: str = "0.8.0"
 
 
 class TerminalResizeOutput(BaseModel):
@@ -245,5 +259,5 @@ class TerminalResizeOutput(BaseModel):
     naws_sent: bool
     success: bool
     message: str
-    server_version: str = "0.7.3"
+    server_version: str = "0.8.0"
 
