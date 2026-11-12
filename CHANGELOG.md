@@ -6,6 +6,9 @@ Unread Telnet and serial output is one byte FIFO. Sends include older unread
 output first, prompt matches leave their tail pending, and EOF/close preserve
 final bytes. Screen tools never consume the stream. Concurrent stream calls are
 serialized; cancelled calls restore unreturned output, including command batches.
+Prompt search maps the pre-send byte boundary in the full reversible text, so
+a split UTF-8 character cannot hide a following prompt. Complete older prompts
+remain excluded, and output after the new matched prompt remains pending.
 
 Stream replies add base64 fields for exact binary payloads and retain readable
 incremental UTF-8 text. Broad regex prompt metadata replaces invalid UTF-8 for

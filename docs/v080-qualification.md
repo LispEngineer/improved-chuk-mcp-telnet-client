@@ -31,15 +31,15 @@ No existing forwarded endpoint was used. That 45-second job passed in 46.22 s.
 
 | Gate | Observed local result |
 | --- | --- |
-| A1 | Final full 10,000-line fake TCP stream, seeded 0–50 ms delays and randomized send/prompt/idle/max-wait/read calls: exact FIFO payload and unique lines; 5,067 calls, 150,732 bytes, 257.602 s |
+| A1 | Prior full 10,000-line fake TCP stream, seeded 0–50 ms delays and randomized send/prompt/idle/max-wait/read calls: exact FIFO payload and unique lines; 5,067 calls, 150,732 bytes, 257.602 s |
 | A2 | Bytes unread before send appear first; an older unread prompt does not complete new input |
 | A3 | TCP and PTY prompt match ending mid-chunk returns only through match; next read returns tail once |
 | A4 | Pending output survives EOF; prompt tail and final data are returned once; repeated EOF reads/close do not replay |
 | A5 | Mixed get-screen/wait/send/read retains the complete FIFO and correct rendered screen |
 | A6 | 5,242,880 unread bytes returned in one read; exact count, payload and raw transcript SHA; roughly 12–13 s |
-| A7 | Final full 10,000-line PTY stream: exact FIFO payload and unique lines; 5,186 calls, 151,700 bytes, 257.237 s; PTY fixture used, no socat/system installation |
+| A7 | Prior full 10,000-line PTY stream: exact FIFO payload and unique lines; 5,186 calls, 151,700 bytes, 257.237 s; PTY fixture used, no socat/system installation |
 | A8 | Two concurrent TCP sessions remain isolated and complete |
-| A9 | Complete fast suite: **86 passed, 2 long stress tests skipped**, 111.91 s; those two opt-in tests passed separately; actual 185-second timeout test: **1 passed**, 186.79 s |
+| A9 | Complete fast suite: **102 passed, 2 long stress tests skipped**, 123.75 s; those two opt-in tests passed separately; actual 185-second timeout test: **1 passed**, 186.79 s |
 
 The current full fast suite includes the earlier two supplemental failure-boundary
 regressions: a failed send retains older unread output, and a busy close fails
@@ -56,9 +56,14 @@ protocol thread has died.
 
 A1/A7 record completed final long-stress repeats against implementation commit
 `2f594929f43ec6fb87c690eb349c80269383a735`, after the broad prompt metadata
-correction. The current full fast suite and five-case packaged-wheel smoke also
-tested that implementation. Later commits only update documentation; package,
-pyproject and lock contents are checked against that implementation commit.
+correction. Those long receipts are retained as prior-implementation evidence,
+not described as rerun on the later prompt-start correction. The current full
+fast suite tests `ce731becc46368601dd15203e976b8e39765a6f5`, whose change only
+maps the prompt-start byte boundary through the full reversible text. The FIFO,
+dequeue and match-end byte mapping did not change; sixteen new exact-payload
+TCP/PTY regressions verify prompt completion and tail retention. No new delivery
+ambiguity warranted another long run. Later documentation commits are checked
+for identical package/pyproject/lock contents against that implementation.
 The 185-second serial timeout
 and 45-second manual job passed before the Telnet-only reset follow-up; their
 relevant serial/normal command paths did not change. Earlier passing runs are
@@ -80,7 +85,7 @@ Build hashes and exact build/source commits are recorded in the external artifac
 manifest; no deployment is implied by a built artifact. Build command:
 
 ```bash
-python -m build --no-isolation --outdir "$HOME/tmp/mud-telnet-v080/metadata-fix/delivery"
+python -m build --no-isolation --outdir "$HOME/tmp/mud-telnet-v080/utf8-offset/delivery"
 ```
 
 Build dependencies are installed only in the dedicated venv. Both wheel and
@@ -114,18 +119,63 @@ available, then matches a broad prompt containing NUL/XON/invalid bytes and a
 valid multibyte character. It checks JSON-safe prompt text, exact raw prefix,
 retained tail, complete FIFO/hash and raw-log equality.
 
-Current evidence is under `$HOME/tmp/mud-telnet-v080/metadata-fix/evidence/`:
+Metadata-stage evidence is under `$HOME/tmp/mud-telnet-v080/metadata-fix/evidence/`:
 `red.log`, `green.log`, `all-tests.log`, `final-tcp.log`, `final-pty.log`,
 `build.log` and `wheel-smoke-final.log`. Final delivery artifact hashes/build
 commit are in `metadata-fix/artifact-manifest.json` under the scratch root.
-The full current suite passed 86 tests with only the two opt-in stress tests
-skipped (111.91 s); the current packaged wheel passed all five smoke cases.
+At that stage the full suite passed 86 tests with only the two opt-in stress
+tests skipped (111.91 s); that packaged wheel passed all five smoke cases.
 Broad-prompt returned stream hashes were TCP
 `da28a03f1ef4c4968998864b87fe27f72e4ef05ed3fcbcd566d48a684a64721f`
 (26 bytes, including its banner) and PTY
 `6f8c1cefc4c6a1656a09de219c8a95674bea882ebccaf6076fd63a265626da18`
 (19 bytes). Host load during targeted TCP/PTY checks was 10.85/10.11/9.98;
 wheel checks recorded approximately 8.15/9.36/9.72.
+
+## UTF-8 prompt-start correction
+
+Independent review reproduced a prompt-completion defect on reviewed `2332c06`:
+old unread bytes `E2 82`, followed after send by `AC RESPONSE> TAIL`, complete
+a euro character. Decoding only the old prefix counts two surrogateescaped
+characters; decoding the full buffer produces one Unicode character. The old
+search offset therefore skips the prompt's first character. A four-byte emoji
+split after three bytes has the same issue. All bytes still return exactly once,
+but the call incorrectly reports incomplete and includes the tail in its timeout
+result; a command batch can stop early. This is distinct from the earlier
+broad-prompt serialization loss.
+
+Commit `ce731be` maps the byte boundary through the **full** reversible decoded
+text, selecting the first complete character boundary at or after the byte
+index. A character spanning the boundary is skipped for prompt matching but its
+bytes remain in the returned stream. Malformed surrogateescaped bytes retain
+one-byte widths; complete older prompts cannot satisfy a new send. Queue and
+match-end behavior are unchanged.
+
+The actual-stdio fail-first matrix has eight payloads over both TCP and PTY:
+valid two/three/four-byte splits, the E2 control, malformed sequences/bytes, an
+older complete prompt plus a new prompt, and an older prompt followed by a split
+character. Before the fix: 6 failed / 10 passed (8.89 s). After: all 16 passed
+(8.43 s). Every before/after raw transcript pair was compared byte-for-byte equal
+and has the same SHA; every corrected response completes through the new prompt,
+and the following read returns only `TAIL`. Evidence, per-case result JSON and
+`exact-payload-pairs.json` are under `$HOME/tmp/mud-telnet-v080/utf8-offset/`.
+
+The original read-only probe source was reused unchanged, with only its output
+path redirected by a wrapper to avoid overwriting earlier evidence. All three
+cases now match the prompt and remain byte-exact. Its obsolete assertions that
+expected the two buggy incomplete outcomes are caught and explicitly replaced
+by new-result assertions in the wrapper; both original source and original
+result-file hashes remain unchanged. See
+`utf8-offset/reused-original/wrapper-receipt.json`.
+
+The full current fast suite passed **102 tests, 2 opt-in long skips**, in 123.75 s.
+This adds sixteen cases to the earlier reproducible 86-fast-case collection;
+the unrelated reviewer count of 85 was not treated as a failed gate without its
+selected IDs/receipt. Current logs are `utf8-offset/evidence/red.log`, `green.log`
+and `all-tests.log`. Packaged-wheel verification and exact build/source hashes
+are recorded in `utf8-offset/artifact-manifest.json`; final wheel smoke exercises
+all sixteen offset cases plus existing TCP/PTY binary-prompt, tail and RFC2217
+EOF cases from an isolated wheel environment, not checkout imports.
 
 ## Byte evidence
 
