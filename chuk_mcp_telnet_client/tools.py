@@ -818,6 +818,23 @@ def _stream_operation(id_argument="session_id"):
     return decorate
 
 
+def _prompt_text_offset(text: str, byte_offset: int) -> int:
+    """First full-text character boundary at/after a reversible byte boundary.
+
+    Decoding only the old prefix can turn an incomplete UTF-8 character into
+    several surrogateescaped characters, unlike decoding the full pending text.
+    Count byte widths in that full text instead; malformed bytes each count once.
+    """
+    if byte_offset <= 0:
+        return 0
+    byte_end = 0
+    for index, character in enumerate(text, 1):
+        byte_end += len(character.encode("utf-8", errors="surrogateescape"))
+        if byte_end >= byte_offset:
+            return index
+    return len(text)
+
+
 async def _wait_for_output(
     session: Union[TelnetSession, SerialSession],
     start_index: int = 0,
@@ -839,7 +856,7 @@ async def _wait_for_output(
             # surrogateescape makes character offsets reversible to payload offsets;
             # these private surrogate characters are never exposed through JSON.
             current = pending.decode("utf-8", errors="surrogateescape")
-            offset = len(pending[:start_index].decode("utf-8", errors="surrogateescape"))
+            offset = _prompt_text_offset(current, start_index) if compiled else 0
             match = compiled.search(current, offset) if compiled else None
             if match:
                 length = len(current[:match.end()].encode("utf-8", errors="surrogateescape"))
