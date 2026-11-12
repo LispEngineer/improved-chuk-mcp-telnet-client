@@ -33,7 +33,8 @@ A unified **Model Context Protocol (MCP)** Terminal Communications Server design
 * **Serial Port Discovery (`serial_list_ports`)**: Enumerates host hardware serial and USB-UART devices (`/dev/ttyUSB*`, `/dev/ttyS*`).
 * **MCP 180-Second (3-Minute) Timeout Immunity**: Both Telnet and Serial tools implement non-blocking execution windows (`max_wait_seconds`) with background stream accumulation and interim progress returns (`command_completed: false`), preventing client tool aborts during long operations exceeding 3 minutes.
 * **Clean, Human-Readable Transcript Logging (Default)**: Emits a clean, contiguous text stream identical to standard Unix `script` or `picocom` session logging (header, raw readable console text in the body, footer at exit).
-* **Single Persistent File Per Session**: Each session maintains exactly one persistent log file (`<session_id>.log`). Sequential commands, streaming output chunks, interactive inputs, and status updates append contiguously without generating fragmented suffix files (`_1.log`, `_2.log`). Reconnecting with an existing session ID safely appends with a clear session start block.
+* **One Persistent Transcript Pair Per Session**: Each logged session has a readable `<session_id>.log` and an exact received-payload `<session_id>.log.raw`. Reconnecting with the same session ID appends to both, without generating fragmented suffix files (`_1.log`, `_2.log`). Budget roughly twice the payload storage, plus text-log metadata and decoding overhead.
+* **Received-Output Audit Trail**: Commands echoed by the host are recorded as received output. Non-echoed input, including a normal password entry, is absent. Input arguments are not separately copied into the transcript; if a host echoes a secret, those received bytes are preserved too.
 * **Explicit Server Version Reporting**: The server reports its version (`server_version: "0.8.0"`) directly in tool return models and session log headers.
 * **Unified Session Directory (`list_sessions`)**: Enumerates all active Telnet and Serial sessions with protocol type, target string, uptime, and byte transfer counters.
 
@@ -53,7 +54,10 @@ A unified **Model Context Protocol (MCP)** Terminal Communications Server design
   closed. Cancelled calls restore unreturned output. Concurrent consumers are
   serialized per session.
 * Received output is logged once to `.log`, with an exact `.log.raw` sidecar.
-  Supplied commands, keys and password inputs are never appended to logs.
+  Host-echoed commands therefore remain in the audit trail. Non-echoed input,
+  including normal password entries, is not recorded. Input arguments are not
+  separately appended. The sidecar stores a second copy of received payload,
+  so allow roughly twice the payload disk space plus text-log overhead.
 * **Migration:** command echoes are preserved; `return_full_buffer=True` now means
   unread FIFO only; reconnect requires explicitly closing the old session.
   These changes intentionally remove the older discard/replay behavior.
@@ -592,8 +596,14 @@ contains exactly the received payload with no metadata or added newlines.
 Transcript headers, timestamps, configuration notices and footers remain in
 `.log`. Attaching logging to a previously unlogged session starts with a header
 and records subsequent output; it cannot reconstruct earlier output. Reconnects
-append to the same files. The server never logs locally supplied input, including
-commands and named/literal keys. Machine-generated echoes remain machine output.
+append to the same files. The server does not separately copy locally supplied
+input arguments, commands or named/literal keys into the logs. When a host echoes
+a command, that echo is received output and appears in both the returned stream
+and transcript. Non-echoed input, such as a password entered with host echo
+disabled, is absent. If the host echoes a secret, its received bytes are preserved;
+the byte-exact raw transcript does not redact machine output. The `.raw` sidecar
+stores an additional copy of the received payload: budget roughly twice its disk
+size, plus readable-log headers, timestamps and decoding overhead.
 
 The byte guarantee applies to application payload received from the transport:
 Telnet/RFC2217 negotiation is framing, and doubled IAC is one payload byte.
