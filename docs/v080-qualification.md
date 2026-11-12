@@ -31,13 +31,13 @@ No existing forwarded endpoint was used. That 45-second job passed in 46.22 s.
 
 | Gate | Observed local result |
 | --- | --- |
-| A1 | Full 10,000-line fake TCP stream, seeded 0–50 ms delays and randomized send/prompt/idle/max-wait/read calls: exact FIFO payload and unique lines; 5,368 calls, 153,307 bytes, 253.53 s |
+| A1 | Final full 10,000-line fake TCP stream, seeded 0–50 ms delays and randomized send/prompt/idle/max-wait/read calls: exact FIFO payload and unique lines; 5,067 calls, 150,732 bytes, 257.602 s |
 | A2 | Bytes unread before send appear first; an older unread prompt does not complete new input |
 | A3 | TCP and PTY prompt match ending mid-chunk returns only through match; next read returns tail once |
 | A4 | Pending output survives EOF; prompt tail and final data are returned once; repeated EOF reads/close do not replay |
 | A5 | Mixed get-screen/wait/send/read retains the complete FIFO and correct rendered screen |
 | A6 | 5,242,880 unread bytes returned in one read; exact count, payload and raw transcript SHA; roughly 12–13 s |
-| A7 | Full 10,000-line PTY stream: exact FIFO payload and unique lines; 5,483 calls, 154,150 bytes, 253.66 s; PTY fixture used, no socat or system installation required |
+| A7 | Final full 10,000-line PTY stream: exact FIFO payload and unique lines; 5,186 calls, 151,700 bytes, 257.237 s; PTY fixture used, no socat/system installation |
 | A8 | Two concurrent TCP sessions remain isolated and complete |
 | A9 | Complete fast suite: **86 passed, 2 long stress tests skipped**, 111.91 s; those two opt-in tests passed separately; actual 185-second timeout test: **1 passed**, 186.79 s |
 
@@ -54,12 +54,12 @@ passed 256,034 bytes, including all byte values and a 256,000-byte burst followe
 immediately by EOF. It exercises the pyserial receive-queue drain after the
 protocol thread has died.
 
-A1/A7 record completed long-stress repeats against implementation commit
-`441a5dd4a5753ff9f35f5024b2abd0646fc9dbfe`, after reset/negotiation recovery
-was added. The current full fast suite tested metadata follow-up implementation
-`2f594929f43ec6fb87c690eb349c80269383a735`. The metadata change affects display
-of matched prompt text, leaving the FIFO and byte-offset arithmetic unchanged;
-the long tests were not rerun on that follow-up. The 185-second serial timeout
+A1/A7 record completed final long-stress repeats against implementation commit
+`2f594929f43ec6fb87c690eb349c80269383a735`, after the broad prompt metadata
+correction. The current full fast suite and five-case packaged-wheel smoke also
+tested that implementation. Later commits only update documentation; package,
+pyproject and lock contents are checked against that implementation commit.
+The 185-second serial timeout
 and 45-second manual job passed before the Telnet-only reset follow-up; their
 relevant serial/normal command paths did not change. Earlier passing runs are
 retained separately. Seeded schedules are reproducible,
@@ -80,7 +80,7 @@ Build hashes and exact build/source commits are recorded in the external artifac
 manifest; no deployment is implied by a built artifact. Build command:
 
 ```bash
-python -m build --no-isolation --outdir "$HOME/tmp/mud-telnet-v080/artifacts-final"
+python -m build --no-isolation --outdir "$HOME/tmp/mud-telnet-v080/metadata-fix/delivery"
 ```
 
 Build dependencies are installed only in the dedicated venv. Both wheel and
@@ -96,7 +96,14 @@ after the byte prefix had been dequeued. The preserved independent probe recorde
 54 bytes sent but only 43 bytes returned: its 11-byte binary/prompt prefix was
 lost, while the next read returned only the tail. This was a real delivery defect,
 not merely unreadable metadata. The root-owned failed probe and archived source
-were preserved without edits.
+were preserved without edits. The primary independent fail/pass pair is
+`root-validation-004/failure-result.json` and `root-validation-006/result.json`
+under the scratch root: both peers emitted the exact same 54 payload bytes.
+Their `.log.raw` files were independently read and compared byte-for-byte equal,
+SHA-256 `dfd31c30521bd4e959907f94204ea2fb002c02b3d2f0b8e255f440417e06db9d`.
+The old candidate returned 43 bytes and lost 11; the corrected candidate returned
+all 54 bytes and JSON-safe metadata. Probe 005 is a separate successful 66-byte
+case with an additional suffix and is not conflated with this exact-payload pair.
 
 Commit `2f59492` converts only display prompt metadata back through its original
 bytes into UTF-8 with replacement, before dequeuing. Offset mapping and raw
@@ -108,7 +115,9 @@ valid multibyte character. It checks JSON-safe prompt text, exact raw prefix,
 retained tail, complete FIFO/hash and raw-log equality.
 
 Current evidence is under `$HOME/tmp/mud-telnet-v080/metadata-fix/evidence/`:
-`red.log`, `green.log`, `all-tests.log`, `build.log` and `wheel-smoke.log`.
+`red.log`, `green.log`, `all-tests.log`, `final-tcp.log`, `final-pty.log`,
+`build.log` and `wheel-smoke-final.log`. Final delivery artifact hashes/build
+commit are in `metadata-fix/artifact-manifest.json` under the scratch root.
 The full current suite passed 86 tests with only the two opt-in stress tests
 skipped (111.91 s); the current packaged wheel passed all five smoke cases.
 Broad-prompt returned stream hashes were TCP
@@ -122,13 +131,14 @@ wheel checks recorded approximately 8.15/9.36/9.72.
 
 | Stream | Sent SHA-256 = returned SHA-256 |
 | --- | --- |
-| A1 TCP | `2a9c6e80425d5199cd63bf3e3006f6b9ec562a79c0b4ab5b4594b8fec78fa916` |
-| A7 PTY | `6d59e560e6dfe92233c5be426dbd8ff42b2c8133b9f8b687efee4cf0eaaac7cf` |
+| A1 TCP | `4aefeab4836759c178ab0c105a6922cbd89e54657d749c8cc9bee09bf85229b0` |
+| A7 PTY | `467669b84ea52150e8c6b6f19c5ee60e5bc7cbf83153386d460455bbe661bbb9` |
 | A6 5 MiB | `18a42ab71ef74ce8c5016d928b7a858aace90effdc15fcf9ab18bdc250e9d945` |
 | RFC2217 | `f2e2e159090daeb660ce593d51b92a5eb0dbf293a5378a755c9fb2196fbd07cf` |
 
-Final stress runs started with host loads (1/5/15 minute averages)
-7.25/8.38/9.14 and ended at 10.89/9.12/9.19 for both transports. This shared host was not idle.
+Final stress host loads (1/5/15 minute averages) were TCP
+10.01/9.78/9.83 at start and 10.69/10.34/10.08 at end; PTY
+10.01/9.78/9.83 at start and 10.69/10.34/10.08 at end. This shared host was not idle.
 Each stress report also records actual elapsed time, call count, payload count,
 SHA and load. Sent/returned binary files, full returned JSONL and the exact raw
 transcript are retained under the corresponding stress test directories.
