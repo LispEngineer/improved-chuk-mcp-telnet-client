@@ -39,13 +39,12 @@ No existing forwarded endpoint was used. That 45-second job passed in 46.22 s.
 | A6 | 5,242,880 unread bytes returned in one read; exact count, payload and raw transcript SHA; roughly 12–13 s |
 | A7 | Full 10,000-line PTY stream: exact FIFO payload and unique lines; 5,483 calls, 154,150 bytes, 253.66 s; PTY fixture used, no socat or system installation required |
 | A8 | Two concurrent TCP sessions remain isolated and complete |
-| A9 | Complete fast suite: **82 passed, 2 long stress tests skipped**, 109.82 s; those two opt-in tests passed separately; actual 185-second timeout test: **1 passed**, 186.79 s |
+| A9 | Complete fast suite: **86 passed, 2 long stress tests skipped**, 111.91 s; those two opt-in tests passed separately; actual 185-second timeout test: **1 passed**, 186.79 s |
 
-Two supplemental failure-boundary regressions also passed (2 tests, 0.28 s):
-a failed send retains older unread output, and a busy close fails explicitly,
-retains the session, then returns in-flight payload on retry. The full fast
-suite above ran before these two test-only additions; together they cover all
-84 current fast cases. No implementation changed for the additions.
+The current full fast suite includes the earlier two supplemental failure-boundary
+regressions: a failed send retains older unread output, and a busy close fails
+explicitly, retains the session, then returns in-flight payload on retry. The
+original separate two-test receipt (0.28 s) remains preserved.
 
 Additional passing cases cover malformed/split UTF-8, NUL/XON/escaped IAC,
 concurrent consumers, cancellation during a batch after EOF, cancelled close,
@@ -55,18 +54,22 @@ passed 256,034 bytes, including all byte values and a 256,000-byte burst followe
 immediately by EOF. It exercises the pyserial receive-queue drain after the
 protocol thread has died.
 
-The table records completed final repeats against implementation commit
+A1/A7 record completed long-stress repeats against implementation commit
 `441a5dd4a5753ff9f35f5024b2abd0646fc9dbfe`, after reset/negotiation recovery
-was added. The preceding full fast suite also tested that implementation. The
-185-second serial timeout and 45-second manual job passed before the Telnet-only
-reset follow-up; their relevant serial/normal command paths did not change.
-Earlier passing runs are retained separately. Seeded schedules are reproducible,
+was added. The current full fast suite tested metadata follow-up implementation
+`2f594929f43ec6fb87c690eb349c80269383a735`. The metadata change affects display
+of matched prompt text, leaving the FIFO and byte-offset arithmetic unchanged;
+the long tests were not rerun on that follow-up. The 185-second serial timeout
+and 45-second manual job passed before the Telnet-only reset follow-up; their
+relevant serial/normal command paths did not change. Earlier passing runs are
+retained separately. Seeded schedules are reproducible,
 but OS scheduling changes command counts and interleaving, so each stress run
 compares its own sent and returned byte oracle.
 
-The built wheel was installed in a second venv and exercised from a scratch cwd,
-with package imports verified under that venv's `site-packages`: TCP prompt tail,
-PTY prompt tail and real RFC2217 EOF/binary payload checks all passed (3 cases).
+The metadata-follow-up wheel was installed in a second venv and exercised from
+a scratch cwd, with package imports verified under that venv's `site-packages`:
+TCP and PTY prompt tails, TCP and PTY broad binary prompt metadata, and real
+RFC2217 EOF/binary payload checks all passed (5 cases).
 The first follow-up-wheel smoke reused an earlier log directory and failed raw
 log equality because reconnect correctly appends. That failed run is retained
 as `wheel-smoke-441a5dd.log`; a fresh unique-directory rerun completed with exit 0
@@ -82,6 +85,38 @@ python -m build --no-isolation --outdir "$HOME/tmp/mud-telnet-v080/artifacts-fin
 
 Build dependencies are installed only in the dedicated venv. Both wheel and
 sdist are produced, and the wheel is built from that sdist by the build frontend.
+
+## Independent broad-prompt failure and correction
+
+Independent review found an actual MCP serialization failure on `8b605f2` after
+the initial local qualification: a broad prompt regex could include malformed
+UTF-8 in its match. The private surrogateescape representation used for reversible
+byte offsets was returned as `prompt_matched`. MCP serialization then failed
+after the byte prefix had been dequeued. The preserved independent probe recorded
+54 bytes sent but only 43 bytes returned: its 11-byte binary/prompt prefix was
+lost, while the next read returned only the tail. This was a real delivery defect,
+not merely unreadable metadata. The root-owned failed probe and archived source
+were preserved without edits.
+
+Commit `2f59492` converts only display prompt metadata back through its original
+bytes into UTF-8 with replacement, before dequeuing. Offset mapping and raw
+payload remain unchanged. New actual-stdio TCP and PTY tests failed first on the
+old code (2 failures), then passed on the correction (2 passes, 1.87 s). Each test
+first induces an invalid-regex tool error, verifies the pending bytes remain
+available, then matches a broad prompt containing NUL/XON/invalid bytes and a
+valid multibyte character. It checks JSON-safe prompt text, exact raw prefix,
+retained tail, complete FIFO/hash and raw-log equality.
+
+Current evidence is under `$HOME/tmp/mud-telnet-v080/metadata-fix/evidence/`:
+`red.log`, `green.log`, `all-tests.log`, `build.log` and `wheel-smoke.log`.
+The full current suite passed 86 tests with only the two opt-in stress tests
+skipped (111.91 s); the current packaged wheel passed all five smoke cases.
+Broad-prompt returned stream hashes were TCP
+`da28a03f1ef4c4968998864b87fe27f72e4ef05ed3fcbcd566d48a684a64721f`
+(26 bytes, including its banner) and PTY
+`6f8c1cefc4c6a1656a09de219c8a95674bea882ebccaf6076fd63a265626da18`
+(19 bytes). Host load during targeted TCP/PTY checks was 10.85/10.11/9.98;
+wheel checks recorded approximately 8.15/9.36/9.72.
 
 ## Byte evidence
 

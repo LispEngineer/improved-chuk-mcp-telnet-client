@@ -8,7 +8,8 @@ final bytes. Screen tools never consume the stream. Concurrent stream calls are
 serialized; cancelled calls restore unreturned output, including command batches.
 
 Stream replies add base64 fields for exact binary payloads and retain readable
-incremental UTF-8 text. Telnet payload preserves NUL, XON and escaped IAC. Serial
+incremental UTF-8 text. Broad regex prompt metadata replaces invalid UTF-8 for
+JSON-safe display without changing matched byte offsets or payload delivery. Telnet payload preserves NUL, XON and escaped IAC. Serial
 RFC2217 EOF drains pyserial's queue after its protocol reader exits. Telnet reset recovery returns already-cooked payload,
 and a failed negotiation reply cannot discard following payload. There is no
 pending-size truncation or lifetime history copy.

@@ -548,7 +548,9 @@ only through the match's end, including on EOF; following bytes stay pending.
 Idle/max-wait returns consume exactly their returned prefix. No pending byte
 limit or automatic history replay is applied.
 
-Readable text is incremental UTF-8 with replacement for invalid sequences. A
+Readable text is incremental UTF-8 with replacement for invalid sequences.
+`prompt_matched` is JSON-safe display text using the same replacement policy;
+regex offsets and authoritative payload bytes remain reversible and exact. A
 split character may appear in a later text reply than its first raw byte.
 Use **base64**, not UTF-8 re-encoding of the text, for byte counts and hashes:
 
