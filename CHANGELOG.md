@@ -9,7 +9,8 @@ serialized; cancelled calls restore unreturned output, including command batches
 
 Stream replies add base64 fields for exact binary payloads and retain readable
 incremental UTF-8 text. Telnet payload preserves NUL, XON and escaped IAC. Serial
-RFC2217 EOF drains pyserial's queue after its protocol reader exits. There is no
+RFC2217 EOF drains pyserial's queue after its protocol reader exits. Telnet reset recovery returns already-cooked payload,
+and a failed negotiation reply cannot discard following payload. There is no
 pending-size truncation or lifetime history copy.
 
 Logging appends each received payload once, plus an exact `.log.raw` sidecar, and

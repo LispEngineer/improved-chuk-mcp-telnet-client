@@ -31,15 +31,21 @@ No existing forwarded endpoint was used. That 45-second job passed in 46.22 s.
 
 | Gate | Observed local result |
 | --- | --- |
-| A1 | Full 10,000-line fake TCP stream, seeded 0–50 ms delays and randomized send/prompt/idle/max-wait/read calls: exact FIFO payload and unique lines; 5,373 calls, 153,382 bytes, 253.53 s |
+| A1 | Full 10,000-line fake TCP stream, seeded 0–50 ms delays and randomized send/prompt/idle/max-wait/read calls: exact FIFO payload and unique lines; 5,368 calls, 153,307 bytes, 253.53 s |
 | A2 | Bytes unread before send appear first; an older unread prompt does not complete new input |
 | A3 | TCP and PTY prompt match ending mid-chunk returns only through match; next read returns tail once |
 | A4 | Pending output survives EOF; prompt tail and final data are returned once; repeated EOF reads/close do not replay |
 | A5 | Mixed get-screen/wait/send/read retains the complete FIFO and correct rendered screen |
 | A6 | 5,242,880 unread bytes returned in one read; exact count, payload and raw transcript SHA; roughly 12–13 s |
-| A7 | Full 10,000-line PTY stream: exact FIFO payload and unique lines; 5,441 calls, 153,800 bytes, 253.73 s; PTY fixture used, no socat or system installation required |
+| A7 | Full 10,000-line PTY stream: exact FIFO payload and unique lines; 5,483 calls, 154,150 bytes, 253.66 s; PTY fixture used, no socat or system installation required |
 | A8 | Two concurrent TCP sessions remain isolated and complete |
-| A9 | Complete fast suite: **80 passed, 2 long stress tests skipped**, 112.93 s; those two opt-in tests passed separately; actual 185-second timeout test: **1 passed**, 186.79 s |
+| A9 | Complete fast suite: **82 passed, 2 long stress tests skipped**, 109.82 s; those two opt-in tests passed separately; actual 185-second timeout test: **1 passed**, 186.79 s |
+
+Two supplemental failure-boundary regressions also passed (2 tests, 0.28 s):
+a failed send retains older unread output, and a busy close fails explicitly,
+retains the session, then returns in-flight payload on retry. The full fast
+suite above ran before these two test-only additions; together they cover all
+84 current fast cases. No implementation changed for the additions.
 
 Additional passing cases cover malformed/split UTF-8, NUL/XON/escaped IAC,
 concurrent consumers, cancellation during a batch after EOF, cancelled close,
@@ -49,31 +55,55 @@ passed 256,034 bytes, including all byte values and a 256,000-byte burst followe
 immediately by EOF. It exercises the pyserial receive-queue drain after the
 protocol thread has died.
 
-A final repeat of the two long stress cases against the frozen source is tracked
-in the external evidence directory. Build hashes and the exact source commit
-are recorded in its artifact manifest after qualification; no deployment is
-implied by a built artifact.
+The table records completed final repeats against implementation commit
+`441a5dd4a5753ff9f35f5024b2abd0646fc9dbfe`, after reset/negotiation recovery
+was added. The preceding full fast suite also tested that implementation. The
+185-second serial timeout and 45-second manual job passed before the Telnet-only
+reset follow-up; their relevant serial/normal command paths did not change.
+Earlier passing runs are retained separately. Seeded schedules are reproducible,
+but OS scheduling changes command counts and interleaving, so each stress run
+compares its own sent and returned byte oracle.
+
+The built wheel was installed in a second venv and exercised from a scratch cwd,
+with package imports verified under that venv's `site-packages`: TCP prompt tail,
+PTY prompt tail and real RFC2217 EOF/binary payload checks all passed (3 cases).
+The first follow-up-wheel smoke reused an earlier log directory and failed raw
+log equality because reconnect correctly appends. That failed run is retained
+as `wheel-smoke-441a5dd.log`; a fresh unique-directory rerun completed with exit 0
+and three passes in `wheel-smoke-441a5dd-2.log`. A premature progress report of
+the first run as passed was explicitly corrected before handoff.
+
+Build hashes and exact build/source commits are recorded in the external artifact
+manifest; no deployment is implied by a built artifact. Build command:
+
+```bash
+python -m build --no-isolation --outdir "$HOME/tmp/mud-telnet-v080/artifacts-final"
+```
+
+Build dependencies are installed only in the dedicated venv. Both wheel and
+sdist are produced, and the wheel is built from that sdist by the build frontend.
 
 ## Byte evidence
 
 | Stream | Sent SHA-256 = returned SHA-256 |
 | --- | --- |
-| A1 TCP | `3e4c1ec28fbaa9dde9e9d2950e9fb4b3d8c8c21065f3fb3fa94510fed337df08` |
-| A7 PTY | `5a445cd8b4f7585a2b985ad13a6e96ecc29fbe2bbb4a493aa4f9067df94d3191` |
+| A1 TCP | `2a9c6e80425d5199cd63bf3e3006f6b9ec562a79c0b4ab5b4594b8fec78fa916` |
+| A7 PTY | `6d59e560e6dfe92233c5be426dbd8ff42b2c8133b9f8b687efee4cf0eaaac7cf` |
 | A6 5 MiB | `18a42ab71ef74ce8c5016d928b7a858aace90effdc15fcf9ab18bdc250e9d945` |
 | RFC2217 | `f2e2e159090daeb660ce593d51b92a5eb0dbf293a5378a755c9fb2196fbd07cf` |
 
-Initial stress host loads (1/5/15 minute averages) were TCP
-10.01/9.39/9.82 and PTY 9.71/9.97/9.94; final loads were TCP
-11.42/10.24/10.02 and PTY 8.98/9.07/9.53. This shared host was not idle.
+Final stress runs started with host loads (1/5/15 minute averages)
+7.25/8.38/9.14 and ended at 10.89/9.12/9.19 for both transports. This shared host was not idle.
 Each stress report also records actual elapsed time, call count, payload count,
 SHA and load. Sent/returned binary files, full returned JSONL and the exact raw
 transcript are retained under the corresponding stress test directories.
 
 Evidence directory: `$HOME/tmp/mud-telnet-v080/evidence/`. Important logs:
 `baseline-m1l.log`, `baseline-loss.json`, `original-tests-on-candidate.log`,
-`fast-lossless-3.log`, `rfc2217.log`, `all-final.log`, `timeout-185.log`,
-`manual-offline.log`, `stress-tcp.log`, and `stress-pty-2.log`.
+`reset-fast.log`, `rfc2217.log`, `reset-all.log`, `failure-boundaries.log`,
+`timeout-185.log`, `manual-offline.log`, `reset-frozen-tcp.log`,
+`reset-frozen-pty.log`, and `wheel-smoke-441a5dd-2.log`. Earlier stress logs,
+including the two corrected fixture failures, are retained too.
 
 ## Legacy test changes and initial failures
 
@@ -105,7 +135,16 @@ a 0.1 s send timeout and stopped prematurely; the first PTY stress counted a
 flush discarded. The corrected PTY peer emits no pre-open banner. Neither
 failure is counted as a passing candidate gate.
 
-## Pending real-world acceptance
+## Boundaries and pending real-world acceptance
+
+The README defines byte-delivery, cancellation, close and crash/reply-loss
+boundaries. A further existing open-failure limitation is explicit: automatic
+RFC2217-to-raw fallback creates a failed first connection before a session exists;
+bytes emitted during failed negotiation/open cannot be recovered from pyserial's
+failed opener. Session delivery guarantees start after successful transport open,
+including payload then queued by the backend. No claim is made for failed opens.
+The pyserial RFC2217 recovery adapter relies on the tested 3.5 receive queue;
+backend-version changes require requalification.
 
 B1–B7 are **pending**: USER1 periodic ticks with interleaved commands/idle gaps,
 unsolicited broadcast, LOGOUT after screen reads, normalized 1 MiB TYPE transfer,

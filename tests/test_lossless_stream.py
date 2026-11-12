@@ -619,3 +619,64 @@ def test_failed_negotiation_reply_preserves_following_payload():
     tn.rawq = telnetlib.DO + b'\x1f' + b'AFTER\x00\x11\xff\xff'
     tn.process_rawq()
     assert tn.read_very_lazy() == b'BEFOREAFTER\x00\x11\xff'
+
+
+def test_failed_send_retains_older_unread_output():
+    import asyncio
+    from unittest.mock import MagicMock
+    from chuk_mcp_telnet_client import tools
+
+    async def run():
+        sid = 'failed-send'
+        session = tools.TelnetSession(MagicMock(), 'localhost', 0, time.time(), sid)
+        session.telnet.write.side_effect = BrokenPipeError('synthetic send failure')
+        tools._session_store._sessions[sid] = session
+        tools._ingest_chunk(session, b'OLDER-UNREAD', time.time())
+        try:
+            with pytest.raises(BrokenPipeError):
+                await tools.telnet_send_input(sid, 'C', max_wait_seconds=0)
+            result = await tools.telnet_read_session(sid, max_wait_seconds=0)
+            assert base64.b64decode(result.raw_base64) == b'OLDER-UNREAD'
+            assert (await tools.telnet_read_session(sid, max_wait_seconds=0)).output == ''
+        finally:
+            tools._session_store._sessions.pop(sid)
+    asyncio.run(run())
+
+
+def test_busy_close_fails_without_discard_then_retry_drains(monkeypatch):
+    import asyncio
+    from chuk_mcp_telnet_client import tools
+
+    async def run():
+        e = Endpoint()
+        release = threading.Event()
+        try:
+            await tools.telnet_client_tool('127.0.0.1', e.port, [],
+                       telnet_session_id='busy-close', response_wait=0.3, enable_logging=False)
+            entered = threading.Event()
+            original = tools._ingest_chunk
+            def ingest(s, data, arrived_at):
+                if data == b'BUSY-IN-FLIGHT':
+                    entered.set()
+                    assert release.wait(5)
+                original(s, data, arrived_at)
+            monkeypatch.setattr(tools, '_ingest_chunk', ingest)
+            monkeypatch.setattr(tools.TerminalDefaults, 'READER_JOIN_SECONDS', 0.01)
+            e.send(b'BUSY-IN-FLIGHT')
+            while not entered.is_set():
+                await asyncio.sleep(0.01)
+            with pytest.raises(RuntimeError, match='retry close'):
+                await tools.telnet_close_session('busy-close')
+            session = await tools._session_store.get('busy-close')
+            assert session is not None
+            release.set()
+            for _ in range(100):
+                if not session.reader_thread.is_alive():
+                    break
+                await asyncio.sleep(0.01)
+            final = await tools.telnet_close_session('busy-close')
+            assert base64.b64decode(final.raw_base64) == b'BUSY-IN-FLIGHT'
+        finally:
+            release.set()
+            e.close()
+    asyncio.run(run())
