@@ -565,3 +565,57 @@ def test_rfc2217_prompt_tail_arbitrary_bytes_and_eof(tmp_path):
     finally:
         mcp.close()
         e.close()
+
+
+def test_connection_reset_recovers_already_cooked_payload():
+    """A later recv error must not hide payload from earlier successful recvs."""
+    import asyncio
+    from chuk_mcp_telnet_client import tools
+
+    async def run():
+        left, right = socket.socketpair()
+        tn = tools.PayloadTelnet()
+        tn.sock = left
+        count = 0
+        def eager():
+            nonlocal count
+            count += 1
+            if count == 1:
+                tn.cookedq = b'COOKED-BEFORE-RESET\x00\x11\xff'
+                raise ConnectionResetError('synthetic reset after successful recv')
+            raise EOFError()
+        tn.read_very_eager = eager
+        session = tools.TelnetSession(tn, 'localhost', 0, time.time(), 'reset')
+        await tools._session_store.store(session)
+        try:
+            right.sendall(b'wakeup')
+            for _ in range(100):
+                if not session.is_active:
+                    break
+                await asyncio.sleep(0.01)
+            assert not session.is_active
+            result = await tools.telnet_read_session('reset', max_wait_seconds=0)
+            assert base64.b64decode(result.raw_base64) == b'COOKED-BEFORE-RESET\x00\x11\xff'
+            assert (await tools.telnet_read_session('reset', max_wait_seconds=0)).output == ''
+            await tools.telnet_close_session('reset')
+        finally:
+            right.close()
+    asyncio.run(run())
+
+
+def test_failed_negotiation_reply_preserves_following_payload():
+    import telnetlib
+    from unittest.mock import MagicMock
+    from chuk_mcp_telnet_client import tools
+
+    tn = tools.PayloadTelnet()
+    tn.sock = MagicMock()
+    tn.sock.sendall.side_effect = BrokenPipeError('synthetic peer closed receiving side')
+    tn.set_option_negotiation_callback(tools._create_negotiation_callback())
+    # Fragmented IAC itself must not block, or eat payload after the option.
+    tn.rawq = b'BEFORE\xff'
+    tn.process_rawq()
+    assert tn.cookedq == b'BEFORE'
+    tn.rawq = telnetlib.DO + b'\x1f' + b'AFTER\x00\x11\xff\xff'
+    tn.process_rawq()
+    assert tn.read_very_lazy() == b'BEFOREAFTER\x00\x11\xff'

@@ -323,13 +323,26 @@ def _finish_reader(session):
             session.logger.log_stream_chunk(session.session_id, text)
 
 
+def _read_telnet_payload(tn):
+    """Recover cooked payload if a later recv in read_very_eager hits reset/EOF."""
+    try:
+        return tn.read_very_eager(), False
+    except (OSError, EOFError):
+        tn.process_rawq()
+        try:
+            data = tn.read_very_lazy()
+        except EOFError:
+            data = b""
+        return data, True
+
+
 def _telnet_reader_thread(session: "TelnetSession") -> None:
     """Read the telnet socket whenever bytes arrive, until EOF or a stop request."""
     try:
         sock = session.telnet.get_socket()
         while not session.stop_event.is_set():
             try:
-                # Wakes on data, on EOF, and on the shutdown() a close does.
+                # Wakes on data or EOF; a close request is checked within the poll interval.
                 readable, _, _ = select.select([sock], [], [], TerminalDefaults.READER_POLL_SECONDS)
             except (OSError, ValueError):
                 break  # the socket was closed under us
@@ -341,13 +354,15 @@ def _telnet_reader_thread(session: "TelnetSession") -> None:
                 # read_very_eager() does not block. telnetlib answers option negotiation
                 # with its own sendall() inside it, hence the write lock.
                 with session.write_lock:
-                    data = session.telnet.read_very_eager()
+                    data, ended = _read_telnet_payload(session.telnet)
             except (OSError, EOFError, AttributeError):
                 logger.info(f"Telnet connection closed for session {session.session_id}")
                 break
             if data:
                 _answer_vt_queries(session, data)
                 _ingest_chunk(session, data, arrived_at)
+            if ended:
+                break
     except Exception as e:
         logger.error(f"Background telnet reader crashed for {session.session_id}: {e}")
     finally:
@@ -457,7 +472,7 @@ def _stop_session_io(session: Union["TelnetSession", "SerialSession"]) -> None:
     try:
         if isinstance(session, TelnetSession):
             with session.write_lock:
-                data = session.telnet.read_very_eager()
+                data, ended = _read_telnet_payload(session.telnet)
         else:
             n = session.serial.in_waiting
             data = _read_serial_payload(session.serial, n) if n else b""
@@ -560,6 +575,17 @@ class PayloadTelnet(telnetlib.Telnet):
     never silently filters payload control bytes. IAC IAC is one payload FF.
     """
 
+    def _notify_option(self, command, option):
+        try:
+            if self.option_callback:
+                self.option_callback(self.sock, command, option)
+            elif option != telnetlib.NOOPT:
+                reject = telnetlib.WONT if command in (telnetlib.DO, telnetlib.DONT) else telnetlib.DONT
+                self.sock.sendall(telnetlib.IAC + reject + option)
+        except OSError as error:
+            # Receive payload remains useful even if the peer stopped receiving.
+            logger.warning("Telnet negotiation reply failed: %s", type(error).__name__)
+
     def process_rawq(self):
         cooked = bytearray()
         sub = bytearray()
@@ -588,17 +614,11 @@ class PayloadTelnet(telnetlib.Telnet):
                         self.sb = 0
                         self.sbdataq += bytes(sub)
                         sub.clear()
-                    if self.option_callback:
-                        self.option_callback(self.sock, c, telnetlib.NOOPT)
+                    self._notify_option(c, telnetlib.NOOPT)
             else:
                 cmd = self.iacseq[1:2]
                 self.iacseq = b""
-                if self.option_callback:
-                    self.option_callback(self.sock, cmd, c)
-                elif cmd in (telnetlib.DO, telnetlib.DONT):
-                    self.sock.sendall(telnetlib.IAC + telnetlib.WONT + c)
-                else:
-                    self.sock.sendall(telnetlib.IAC + telnetlib.DONT + c)
+                self._notify_option(cmd, c)
         self.cookedq += bytes(cooked)
         self.sbdataq += bytes(sub)
 
