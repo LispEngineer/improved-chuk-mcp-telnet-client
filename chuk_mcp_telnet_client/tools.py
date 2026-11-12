@@ -843,7 +843,12 @@ async def _wait_for_output(
             match = compiled.search(current, offset) if compiled else None
             if match:
                 length = len(current[:match.end()].encode("utf-8", errors="surrogateescape"))
-                return _take_pending(session, length), True, match.group(0)
+                # Only byte-offset arithmetic uses surrogateescape. Prompt metadata
+                # must be valid Unicode before the MCP serializer sees the result.
+                matched_prompt = match.group(0).encode("utf-8", errors="surrogateescape").decode(
+                    "utf-8", errors="replace"
+                )
+                return _take_pending(session, length), True, matched_prompt
             if not session.is_active:
                 return _take_pending(session, final=True), True, None
             if idle_timeout is not None and pending and time.monotonic() - session.last_rx_monotonic >= idle_timeout:

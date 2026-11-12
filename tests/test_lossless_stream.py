@@ -680,3 +680,46 @@ def test_busy_close_fails_without_discard_then_retry_drains(monkeypatch):
             release.set()
             e.close()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize('transport', ['telnet', 'serial'])
+def test_broad_prompt_metadata_binary_safe_after_tool_error(transport, tmp_path):
+    """Prompt text is JSON-safe; raw delivery/offsets survive broad binary matches.
+
+    An invalid-regex tool error before the successful read must leave all pending
+    bytes available. This uses the actual stdio serializer for both TCP and PTY.
+    """
+    e = Endpoint(transport)
+    mcp = Mcp(str(tmp_path))
+    try:
+        opening = connect(mcp, e)
+        collected = bytearray(payload(opening, 'initial_banner_raw_base64'))
+        prefix = b'\x00\x11\x80\xfe\xe2\x82\xacBROAD> '
+        tail = b'TAIL2'
+        e.send(prefix + tail)
+        wait_bytes(mcp, e, len(e.sent))
+        # The failed call cannot consume anything before it reports its error.
+        with pytest.raises(RuntimeError):
+            mcp.tool(transport + '_read_session', dict(session_id='lossless',
+                     prompt_pattern='[', max_wait_seconds=0))
+        result = mcp.tool(transport + '_read_session', dict(session_id='lossless',
+                          prompt_pattern=r'(?s).+BROAD> ', max_wait_seconds=1))
+        assert payload(result) == prefix
+        assert result['prompt_matched'] == prefix.decode('utf-8', errors='replace')
+        assert not any(0xD800 <= ord(c) <= 0xDFFF for c in result['prompt_matched'])
+        result['prompt_matched'].encode('utf-8')
+        collected.extend(payload(result))
+        remaining = read(mcp, e)
+        assert payload(remaining) == tail
+        collected.extend(payload(remaining))
+        assert payload(read(mcp, e)) == b''
+        final = mcp.tool(transport + '_close_session', dict(session_id='lossless'))
+        collected.extend(payload(final))
+        assert bytes(collected) == bytes(e.sent)
+        assert hashlib.sha256(collected).digest() == hashlib.sha256(e.sent).digest()
+        assert Path(tmp_path, 'lossless.log.raw').read_bytes() == bytes(e.sent)
+        print('BROAD-PROMPT', json.dumps(dict(transport=transport, bytes=len(collected),
+                    sha256=hashlib.sha256(collected).hexdigest(), load=os.getloadavg())))
+    finally:
+        mcp.close()
+        e.close()
