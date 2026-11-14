@@ -239,3 +239,93 @@ def test_c_exact_bytes_stay_in_the_raw_transcript_without_include_raw(peer):
     transcripts = list(tmp.glob('*.log.raw'))
     assert len(transcripts) == 1
     assert transcripts[0].read_bytes() == bytes(e.sent)
+
+
+# ---- (d) empty / None fields, the constant list_sessions note, per-call server_version ------------
+
+
+def connect_plain(mcp, e, **extra):
+    return mcp.tool('telnet_client', dict(host='127.0.0.1', port=e.port, commands=[], telnet_session_id='t',
+                                          response_wait=0.3, **extra))
+
+
+def test_d_stream_results_leave_out_nothing_fields(peer):
+    mcp, e, _ = peer
+    opening = connect_plain(mcp, e, enable_logging=False)
+    assert opening['server_version'] and opening['initial_banner'] == 'READY> '
+    assert 'final_output' not in opening and 'log_file' not in opening and 'prompt_matched' not in opening
+    again = mcp.tool('telnet_client', dict(host='127.0.0.1', port=e.port, commands=['C1'],
+                                           telnet_session_id='t', prompt_pattern=r'P> ',
+                                           enable_logging=False))
+    assert 'initial_banner' not in again and again['prompt_matched'] == 'P> '
+    assert again['server_version']
+    quiet = mcp.tool('telnet_read_session', dict(session_id='t', max_wait_seconds=0))
+    assert set(quiet) == {'session_id', 'host', 'port', 'output', 'new_bytes_count',
+                          'total_bytes_received', 'command_completed', 'session_active'}
+    assert quiet['output'] == 'TAIL\r\n'
+    empty = mcp.tool('telnet_read_session', dict(session_id='t', max_wait_seconds=0))
+    assert empty['output'] == '' and empty['new_bytes_count'] == 0 and empty['session_active'] is True
+    sent = mcp.tool('telnet_send_input', dict(session_id='t', input_text='C2', prompt_pattern=r'P> '))
+    assert 'note' not in sent and 'server_version' not in sent and sent['prompt_matched'] == 'P> '
+    assert sent['command_completed'] is True
+    closed = mcp.tool('telnet_close_session', dict(session_id='t'))
+    assert closed['success'] is True and 'output' in closed       # TAIL was still unread
+    gone = mcp.tool('telnet_close_session', dict(session_id='t'))
+    assert gone['success'] is False and 'output' not in gone
+
+
+def test_d_log_file_is_reported_when_logging(peer):
+    mcp, e, tmp = peer
+    opening = connect_plain(mcp, e)
+    assert opening['log_file'].startswith(str(tmp))
+    assert mcp.tool('telnet_read_session', dict(session_id='t', max_wait_seconds=0))['log_file']
+
+
+def test_d_list_sessions_keeps_server_version_once_and_drops_the_note(peer):
+    mcp, e, _ = peer
+    connect_plain(mcp, e)
+    listing = mcp.tool('list_sessions', {})
+    assert listing['server_version'] and 'note' not in listing
+    assert listing['active_sessions'] == 1
+    assert 'server_version' not in listing['sessions']['t']
+
+
+def test_d_screen_results_have_no_server_version_and_no_empty_fields(peer):
+    mcp, e, _ = peer
+    connect_plain(mcp, e)
+    e.send(b'\x1b[2J\x1b[Hhello')
+    wait_bytes(mcp, e, len(e.sent), 't')
+    screen = mcp.tool('terminal_get_screen', dict(session_id='t'))
+    assert 'server_version' not in screen and 'highlighted_lines' not in screen
+    assert screen['rows'] == 24 and screen['cursor_visible'] is True
+    key = mcp.tool('terminal_send_key', dict(session_id='t', key='SPACE', wait_seconds=0.1))
+    assert 'server_version' not in key and key['success'] is True
+    waited = mcp.tool('terminal_wait_for_change', dict(session_id='t', timeout_seconds=0.3,
+                                                       settle_seconds=0.05, pattern='nomatch'))
+    assert 'server_version' not in waited and 'pattern_matched' not in waited
+    assert waited['timed_out'] is True and waited['changed'] in (True, False)
+    resized = mcp.tool('terminal_resize', dict(session_id='t', cols=100, rows=30))
+    assert 'server_version' not in resized and resized['success'] is True
+    e.send(b'\x1b[2J\x1b[H\x1b[7mSEL\x1b[0m')
+    wait_bytes(mcp, e, len(e.sent), 't')
+    marked = mcp.tool('terminal_get_screen', dict(session_id='t'))
+    assert marked['highlighted_lines'] == [1]
+    hit = mcp.tool('terminal_wait_for_change', dict(session_id='t', timeout_seconds=2,
+                                                    settle_seconds=0.05, pattern='SEL'))
+    assert hit['pattern_matched'] == 'SEL' and hit['highlighted_lines'] == [1]
+
+
+def test_d_serial_results_follow_the_same_rules(tmp_path):
+    e = Endpoint('serial')
+    mcp = Mcp(str(tmp_path))
+    try:
+        opening = mcp.tool('serial_client', dict(port=e.port, commands=[], serial_session_id='s',
+                                                 response_wait=0.3, enable_logging=False))
+        assert opening['server_version'] and 'final_output' not in opening and 'log_file' not in opening
+        quiet = mcp.tool('serial_read_session', dict(session_id='s', max_wait_seconds=0))
+        assert 'prompt_matched' not in quiet and 'log_file' not in quiet and quiet['output'] == ''
+        listing = mcp.tool('list_sessions', {})
+        assert 'server_version' not in listing['sessions']['s']
+    finally:
+        mcp.close()
+        e.close()

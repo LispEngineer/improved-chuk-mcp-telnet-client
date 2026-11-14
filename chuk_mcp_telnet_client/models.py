@@ -2,25 +2,36 @@
 from typing import Any, ClassVar, Dict, FrozenSet, List, Optional, Union
 from pydantic import BaseModel, Field, model_serializer
 
+SERVER_VERSION = "0.8.0"
+
 
 class CompactModel(BaseModel):
     """Result model that leaves out fields that carry no information.
 
     The MCP server serializes a result with model_dump(), and every field it emits
-    costs the calling agent tokens. A subclass lists in OMIT_IF_NONE the optional
-    fields that are dropped from the result while they are None (for example
-    raw_base64 when the caller did not ask for it). Booleans, counts and the
-    primary text of a result are never listed, so a False, a 0 or an empty reply
-    is always stated explicitly.
+    costs the calling agent tokens. A subclass lists, per field, when to leave it out:
+
+    * OMIT_IF_NONE: dropped while None (for example raw_base64 when the caller did
+      not ask for it).
+    * OMIT_IF_EMPTY: dropped when None, "", [] or {} (nothing to say).
+
+    Booleans, counts and the primary text of a result (output, response,
+    screen_text) are never listed, so a False, a 0 or an empty reply is always
+    stated explicitly.
     """
 
     OMIT_IF_NONE: ClassVar[FrozenSet[str]] = frozenset()
+    OMIT_IF_EMPTY: ClassVar[FrozenSet[str]] = frozenset()
 
     @model_serializer(mode="wrap")
     def _omit_unset(self, handler):
         data = handler(self)
         for name in self.OMIT_IF_NONE:
             if data.get(name, False) is None:
+                del data[name]
+        for name in self.OMIT_IF_EMPTY:
+            value = data.get(name, False)
+            if value is None or (isinstance(value, (str, list, dict)) and not value):
                 del data[name]
         return data
 
@@ -47,9 +58,10 @@ class CommandResponse(CompactModel):
 
 
 class TelnetClientOutput(CompactModel):
+    OMIT_IF_EMPTY = frozenset({"initial_banner", "final_output", "prompt_matched", "log_file"})
     OMIT_IF_NONE = frozenset({"initial_banner_raw_base64", "final_output_raw_base64", "raw_included_reason"})
 
-    server_version: str = "0.8.0"
+    server_version: str = SERVER_VERSION
     host: str
     port: int
     initial_banner: str
@@ -66,6 +78,7 @@ class TelnetClientOutput(CompactModel):
 
 
 class TelnetReadSessionOutput(CompactModel):
+    OMIT_IF_EMPTY = frozenset({"prompt_matched", "log_file"})
     OMIT_IF_NONE = frozenset({"raw_base64", "raw_included_reason"})
 
     session_id: str
@@ -83,6 +96,7 @@ class TelnetReadSessionOutput(CompactModel):
 
 
 class TelnetSendInputOutput(CompactModel):
+    OMIT_IF_EMPTY = frozenset({"prompt_matched", "log_file"})
     OMIT_IF_NONE = frozenset({"raw_base64", "raw_included_reason"})
 
     session_id: str
@@ -114,9 +128,10 @@ class SerialClientInput(BaseModel):
 
 
 class SerialClientOutput(CompactModel):
+    OMIT_IF_EMPTY = frozenset({"initial_banner", "final_output", "prompt_matched", "log_file"})
     OMIT_IF_NONE = frozenset({"initial_banner_raw_base64", "final_output_raw_base64", "raw_included_reason"})
 
-    server_version: str = "0.8.0"
+    server_version: str = SERVER_VERSION
     port: str
     baudrate: int
     initial_banner: str
@@ -133,6 +148,7 @@ class SerialClientOutput(CompactModel):
 
 
 class SerialReadSessionOutput(CompactModel):
+    OMIT_IF_EMPTY = frozenset({"prompt_matched", "log_file"})
     OMIT_IF_NONE = frozenset({"raw_base64", "raw_included_reason"})
 
     session_id: str
@@ -150,6 +166,7 @@ class SerialReadSessionOutput(CompactModel):
 
 
 class SerialSendInputOutput(CompactModel):
+    OMIT_IF_EMPTY = frozenset({"prompt_matched", "log_file"})
     OMIT_IF_NONE = frozenset({"raw_base64", "raw_included_reason"})
 
     session_id: str
@@ -164,6 +181,7 @@ class SerialSendInputOutput(CompactModel):
 
 
 class SerialSendBreakOutput(CompactModel):
+    OMIT_IF_EMPTY = frozenset({"prompt_matched"})
     OMIT_IF_NONE = frozenset({"raw_base64", "raw_included_reason"})
 
     session_id: str
@@ -214,21 +232,18 @@ class SessionInfo(BaseModel):
     age_seconds: float
     is_active: bool
     total_bytes_received: int
-    server_version: str = "0.8.0"
 
 
 class SessionListResponse(BaseModel):
     """Response for listing all active sessions."""
 
-    server_version: str = "0.8.0"
+    server_version: str = SERVER_VERSION
     active_sessions: int
     sessions: Dict[str, SessionInfo]
-    note: str = (
-        "Active connections shown. Sessions persist and stream output continuously in the background."
-    )
 
 
 class SessionCloseResponse(CompactModel):
+    OMIT_IF_EMPTY = frozenset({"output"})
     OMIT_IF_NONE = frozenset({"raw_base64", "raw_included_reason"})
 
     """Final unread stream delivery at the explicit close boundary."""
@@ -246,6 +261,7 @@ class SessionCloseResponse(CompactModel):
 
 
 class TerminalScreenOutput(CompactModel):
+    OMIT_IF_EMPTY = frozenset({"highlighted_lines", "cursor_char"})
     OMIT_IF_NONE = frozenset({"annotated_text"})
 
     """Rendered 2D screen text matrix and visual attributes from terminal emulation."""
@@ -260,10 +276,10 @@ class TerminalScreenOutput(CompactModel):
     screen_text: str
     annotated_text: Optional[str] = Field(None, description="Screen text with reverse-video runs marked * [like this] *; omitted when identical to screen_text.")
     highlighted_lines: List[int]
-    server_version: str = "0.8.0"
 
 
 class TerminalWaitForChangeOutput(CompactModel):
+    OMIT_IF_EMPTY = frozenset({"highlighted_lines", "cursor_char", "pattern_matched"})
     OMIT_IF_NONE = frozenset({"annotated_text"})
 
     """Result of terminal_wait_for_change: why the wait ended, and the screen at that moment."""
@@ -284,7 +300,6 @@ class TerminalWaitForChangeOutput(CompactModel):
     screen_text: str
     annotated_text: Optional[str] = Field(None, description="Screen text with reverse-video runs marked * [like this] *; omitted when identical to screen_text.")
     highlighted_lines: List[int]
-    server_version: str = "0.8.0"
 
 
 class TerminalSendKeyOutput(CompactModel):
@@ -302,7 +317,6 @@ class TerminalSendKeyOutput(CompactModel):
     cursor_row: Optional[int] = None
     cursor_col: Optional[int] = None
     cursor_visible: Optional[bool] = None
-    server_version: str = "0.8.0"
 
 
 class TerminalResizeOutput(BaseModel):
@@ -314,5 +328,4 @@ class TerminalResizeOutput(BaseModel):
     naws_sent: bool
     success: bool
     message: str
-    server_version: str = "0.8.0"
 
