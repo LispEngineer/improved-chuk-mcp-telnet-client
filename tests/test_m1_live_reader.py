@@ -365,7 +365,7 @@ def test_wait_for_change_pattern(mcp):
         r = mcp.tool("terminal_wait_for_change", {
             "session_id": "wait4", "timeout_seconds": 1.0, "pattern": r"NEVER"})
         took = time.time() - t0
-        assert r["pattern_matched"] is None
+        assert "pattern_matched" not in r  # 0.9.0 leaves a null pattern_matched out
         assert r["timed_out"] is True
         assert 1.0 <= took <= 1.0 + 0.3
     finally:

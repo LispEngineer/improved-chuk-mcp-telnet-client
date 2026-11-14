@@ -100,6 +100,7 @@ Reading it:
 Updated, because they asserted `raw_base64` is present by default: `tests/test_lossless_stream.py`
 (its MCP client now passes `include_raw: true` on stream calls, and its seven in-process
 calls that read `.raw_base64` pass it) and `tests/test_utf8_prompt_offset.py` (uses that client).
+`tests/test_m1_live_reader.py::test_wait_for_change_pattern` asserted `pattern_matched is None`; it now asserts the field is absent.
 `tests/test_standalone_serial.py` expects `server_version == "0.9.0"`.
 New: `tests/test_token_efficiency.py` (every change, the automatic raw for undecodable
 and split bytes, byte-exact round trip over all byte values on TCP and PTY with

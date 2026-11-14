@@ -26,7 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from test_m1_live_reader import Mcp  # noqa: E402
 
 SHOW_SYSTEM = (
-    "OpenVMS V8.4-2L1  on node AXP1  14-NOV-2026 16:00:00.12  Uptime  41 03:12:09\r\n"
+    "OpenVMS V8.4-2L1  on node NODE  14-NOV-2026 16:00:00.12  Uptime  41 03:12:09\r\n"
     "  Pid    Process Name    State  Pri      I/O       CPU       Page flts  Pages\r\n"
     "00000401 SWAPPER         HIB     16        0   0 00:00:00.43         0      0\r\n"
     "00000405 CONFIGURE       HIB     10        4   0 00:00:00.03       110    142\r\n"
@@ -78,7 +78,7 @@ class Host:
     def _serve(self):
         if self.transport == "telnet":
             self.conn, _ = self.srv.accept()
-            self._send(b"\r\nWelcome to AXP1\r\n$ ")
+            self._send(b"\r\nWelcome to NODE\r\n$ ")
         buf = b""
         while not self.stop.is_set():
             fd = self.conn if self.transport == "telnet" else self.master

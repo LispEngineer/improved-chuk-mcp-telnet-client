@@ -41,7 +41,8 @@ after: `docs/TOKEN_EFFICIENCY.md`.
 * Stream delivery semantics, logging and the session API are unchanged.
 * Tests that asserted `raw_base64` by default now pass `include_raw`
   (`tests/test_lossless_stream.py`, `tests/test_utf8_prompt_offset.py`);
-  `tests/test_standalone_serial.py` expects `server_version` `0.9.0`.
+  `tests/test_m1_live_reader.py::test_wait_for_change_pattern` expects `pattern_matched`
+  absent instead of null; `tests/test_standalone_serial.py` expects `server_version` `0.9.0`.
 
 ## 0.8.0
 
