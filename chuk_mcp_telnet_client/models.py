@@ -2,7 +2,7 @@
 from typing import Any, ClassVar, Dict, FrozenSet, List, Optional, Union
 from pydantic import BaseModel, Field, model_serializer
 
-SERVER_VERSION = "0.8.0"
+SERVER_VERSION = "0.9.0"
 
 
 class CompactModel(BaseModel):

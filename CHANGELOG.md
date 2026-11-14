@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.9.0
+
+Token-efficient results. **This changes the default output of the stream and screen
+tools: an agent that parsed `raw_base64` must now ask for it.** Sizes before and
+after: `docs/TOKEN_EFFICIENCY.md`.
+
+### API changes
+
+* `raw_base64`, `initial_banner_raw_base64`, `final_output_raw_base64` (also inside
+  `responses[]` and the close replies) are no longer returned by default. Every tool
+  that returns stream output (`telnet_client`, `serial_client`, `telnet_send_input`,
+  `serial_send_input`, `telnet_read_session`, `serial_read_session`,
+  `telnet_close_session`, `serial_close_session`, `serial_send_break`) takes
+  `include_raw: bool = False`; `include_raw: true` returns them as in 0.8.0
+  (an empty delivery is `""`).
+* Lossless guarantee kept: when a delivery's text cannot stand for its bytes (invalid
+  UTF-8, or a UTF-8 character split across two deliveries) the result includes
+  `raw_base64` even without `include_raw`, plus `raw_included_reason`
+  (`"invalid_or_split_utf8"`). The exact-byte `.log.raw` transcript is unchanged.
+* `annotated_text` (terminal_get_screen, terminal_wait_for_change, terminal_send_key)
+  is returned only when it differs from `screen_text`.
+* Left out when null or empty: `prompt_matched`, `log_file`, `pattern_matched`,
+  `cursor_char`, `highlighted_lines`, `initial_banner`, `final_output`, and a close
+  reply's `output`. Booleans, counts, `output`, `response` and `screen_text` are
+  always present.
+* `server_version` (now `0.9.0`) only in `telnet_client`, `serial_client` and
+  `list_sessions`; `list_sessions` drops its constant `note` and the per-session
+  `server_version`.
+* Screens: trailing blank lines are cut from `screen_text`/`annotated_text`.
+  `full_screen: true` (or `include_raw: true`) on `terminal_get_screen`,
+  `terminal_wait_for_change` and `terminal_send_key` returns every row. Lines were
+  already right-trimmed in 0.8.0. Row numbers and `rows`/`cols` are unchanged.
+
+### Migration
+
+* Pass `include_raw: true` wherever exact bytes, byte hashes or binary data matter.
+* Treat a missing `annotated_text` as equal to `screen_text`, and any other missing
+  optional field as null/empty.
+* Stream delivery semantics, logging and the session API are unchanged.
+* Tests that asserted `raw_base64` by default now pass `include_raw`
+  (`tests/test_lossless_stream.py`, `tests/test_utf8_prompt_offset.py`);
+  `tests/test_standalone_serial.py` expects `server_version` `0.9.0`.
+
 ## 0.8.0
 
 Unread Telnet and serial output is one byte FIFO. Sends include older unread

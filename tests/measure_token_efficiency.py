@@ -45,6 +45,8 @@ SCREEN = "\x1b[2J\x1b[H" + "".join(
     f"\x1b[{row};1H" + (f"\x1b[7m MENU ITEM {row:<20}\x1b[0m" if row == 5 else f"Line {row}: some terminal text")
     for row in range(1, 13)
 ) + "\x1b[22;1H$ "
+# The same screen without the reverse-video line.
+PLAIN_SCREEN = "\x1b[2J\x1b[H" + "".join(f"\x1b[{row};1HLine {row}: some terminal text" for row in range(1, 13)) + "\x1b[22;1H$ "
 BINARY = b"\x80\x81\x1b[?25h\x07noise\xc3\x28\r\n$ "
 
 
@@ -92,6 +94,8 @@ class Host:
                 line = line.strip(b"\r\n")
                 if line == b"SCREEN":
                     self._send(SCREEN.encode())
+                elif line == b"PLAIN":
+                    self._send(PLAIN_SCREEN.encode())
                 elif line == b"BINARY":
                     self._send(BINARY)
                 else:
@@ -143,11 +147,16 @@ def main():
         mcp.tool("telnet_send_input", dict(session_id="t", input_text="SCREEN", max_wait_seconds=1,
                                            prompt_pattern=r"\$ $"))
         time.sleep(0.5)
-        rec("terminal_get_screen (24x80, 12 lines used)", mcp.tool("terminal_get_screen", dict(session_id="t")))
+        rec("terminal_get_screen (24x80, 12 lines used, one reverse-video line)",
+            mcp.tool("terminal_get_screen", dict(session_id="t")))
         rec("terminal_wait_for_change (screen unchanged)",
             mcp.tool("terminal_wait_for_change", dict(session_id="t", timeout_seconds=0.5, settle_seconds=0.1)))
         rec("terminal_send_key (ENTER)", mcp.tool("terminal_send_key", dict(session_id="t", key="ENTER",
                                                                                wait_seconds=0.3)))
+        mcp.tool("telnet_send_input", dict(session_id="t", input_text="PLAIN", max_wait_seconds=1,
+                                           prompt_pattern=r"\$ $"))
+        time.sleep(0.5)
+        rec("terminal_get_screen (24x80, 12 lines used, plain)", mcp.tool("terminal_get_screen", dict(session_id="t")))
         rec("telnet_close_session", mcp.tool("telnet_close_session", dict(session_id="t")))
         t.close()
 

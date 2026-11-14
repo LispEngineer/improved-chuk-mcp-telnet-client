@@ -579,7 +579,7 @@ def test_network_serial_raw_socket():
                 max_wait_seconds=5.0,
             )
             assert res.command_completed is True
-            assert res.server_version == "0.8.0"
+            assert res.server_version == "0.9.0"
             assert any("16-SEP-2026" in r.response for r in res.responses)
 
             # Test session info in list_sessions
@@ -641,7 +641,7 @@ def test_network_serial_fallback_from_host_port():
                 max_wait_seconds=5.0,
             )
             assert res.command_completed is True
-            assert res.server_version == "0.8.0"
+            assert res.server_version == "0.9.0"
         finally:
             server.stop()
 

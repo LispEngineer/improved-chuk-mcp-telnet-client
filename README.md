@@ -35,12 +35,46 @@ A unified **Model Context Protocol (MCP)** Terminal Communications Server design
 * **Clean, Human-Readable Transcript Logging (Default)**: Emits a clean, contiguous text stream identical to standard Unix `script` or `picocom` session logging (header, raw readable console text in the body, footer at exit).
 * **One Persistent Transcript Pair Per Session**: Each logged session has a readable `<session_id>.log` and an exact received-payload `<session_id>.log.raw`. Reconnecting with the same session ID appends to both, without generating fragmented suffix files (`_1.log`, `_2.log`). Budget roughly twice the payload storage, plus text-log metadata and decoding overhead.
 * **Received-Output Audit Trail**: Commands echoed by the host are recorded as received output. Non-echoed input, including a normal password entry, is absent. Input arguments are not separately copied into the transcript; if a host echoes a secret, those received bytes are preserved too.
-* **Explicit Server Version Reporting**: The server reports its version (`server_version: "0.8.0"`) directly in tool return models and session log headers.
+* **Explicit Server Version Reporting**: The server reports its version (`server_version: "0.9.0"`) in the `telnet_client`, `serial_client` and `list_sessions` results and in session log headers (other per-call results omit it to save tokens).
 * **Unified Session Directory (`list_sessions`)**: Enumerates all active Telnet and Serial sessions with protocol type, target string, uptime, and byte transfer counters.
 
 ---
 
 ## Release History & Changes
+
+### Version 0.9.0
+
+**Token-efficient results. This changes the default output of many tools; read the
+migration note.** Measurements: [docs/TOKEN_EFFICIENCY.md](docs/TOKEN_EFFICIENCY.md).
+
+* **`raw_base64` is opt-in.** Every stream tool that returns output (`telnet_client`,
+  `serial_client`, `*_send_input`, `*_read_session`, `*_close_session`,
+  `serial_send_break`) takes `include_raw` (default `false`). Without it, the result
+  has no `raw_base64`, `initial_banner_raw_base64` or `final_output_raw_base64`.
+  Pass `include_raw: true` when exact bytes matter (BREAK handling, binary noise,
+  escape sequences, hashes, byte counts).
+* **Exact bytes are never lost silently.** When the returned text cannot stand for
+  the bytes of a delivery (invalid UTF-8, or a UTF-8 character split across two
+  deliveries), the result carries `raw_base64` anyway, with
+  `"raw_included_reason": "invalid_or_split_utf8"`. The byte-exact `<session>.log.raw`
+  transcript is unchanged.
+* **`annotated_text` only when it differs from `screen_text`** (that is, when the
+  screen has reverse-video text).
+* **Fields with nothing to say are left out**: `prompt_matched`, `log_file`,
+  `pattern_matched`, `cursor_char` when null; `highlighted_lines` when empty;
+  `initial_banner`, `final_output` and a close reply's `output` when empty.
+  Booleans, counts, `output`, `response` and `screen_text` are always present.
+  `server_version` stays in `telnet_client`, `serial_client` and `list_sessions`
+  only; `list_sessions` no longer sends its constant `note` or a `server_version`
+  per session.
+* **Screens drop trailing blank lines** (`terminal_get_screen`,
+  `terminal_wait_for_change`, `terminal_send_key`). `full_screen: true` returns all
+  rows (`include_raw: true` does too). Lines were already right-trimmed.
+  `rows` and `cols` give the full size; line numbers count from the top.
+* **Migration:** an agent that read `raw_base64` (or the other `*_raw_base64`
+  fields) must now pass `include_raw: true`. An agent that read `annotated_text`
+  must treat a missing field as "same as `screen_text`". A missing optional field
+  means null/empty. Stream delivery semantics are unchanged.
 
 ### Version 0.8.0
 
@@ -202,23 +236,28 @@ The server exposes 17 MCP tools across Telnet, Serial, and Visual Terminal categ
 
 | Tool | Category | Purpose | Key Arguments |
 | :--- | :--- | :--- | :--- |
-| `terminal_get_screen` | Visual | Inspects the rendered 2D terminal canvas, cursor position, and highlighted reverse-video text. Always current (v0.7.1): `wait_seconds=0` shows everything received so far. | `session_id`, `wait_seconds` |
-| `terminal_wait_for_change` | Visual | Waits in one call until the screen changes since the last screen read (or shows `pattern`) and has been quiet for `settle_seconds`, then returns it; or returns at `timeout_seconds` (capped at 300). | `session_id`, `timeout_seconds`, `settle_seconds`, `pattern` |
-| `terminal_send_key` | Visual | Sends named keyboard keys or VT escape sequences (e.g. `UP`, `DOWN`, `TAB`, `ENTER`, `ESC`, `CTRL_Z`) and returns the updated screen. | `session_id`, `key`, `wait_seconds` |
+| `terminal_get_screen` | Visual | Inspects the rendered 2D terminal canvas, cursor position, and highlighted reverse-video text. Always current (v0.7.1): `wait_seconds=0` shows everything received so far. | `session_id`, `wait_seconds`, `full_screen` |
+| `terminal_wait_for_change` | Visual | Waits in one call until the screen changes since the last screen read (or shows `pattern`) and has been quiet for `settle_seconds`, then returns it; or returns at `timeout_seconds` (capped at 300). | `session_id`, `timeout_seconds`, `settle_seconds`, `pattern`, `full_screen` |
+| `terminal_send_key` | Visual | Sends named keyboard keys or VT escape sequences (e.g. `UP`, `DOWN`, `TAB`, `ENTER`, `ESC`, `CTRL_Z`) and returns the updated screen. | `session_id`, `key`, `wait_seconds`, `full_screen` |
 | `terminal_resize` | Visual | Dynamically resizes the virtual terminal canvas and sends RFC 1073 Telnet NAWS window resize negotiation. | `session_id`, `cols`, `rows` |
-| `telnet_client` | Telnet | Connects or sends command sequences via Telnet with prompt waiting and session logging. | `host`, `port`, `commands`, `telnet_session_id`, `prompt_pattern`, `newline`, `max_wait_seconds` |
-| `telnet_read_session` | Telnet | Non-blocking read/polling of the background stream buffer for an active Telnet session. | `session_id`, `prompt_pattern`, `max_wait_seconds`, `idle_timeout` |
-| `telnet_send_input` | Telnet | Sends interactive input or raw keystrokes to an active Telnet session. | `session_id`, `input_text`, `raw`, `newline`, `max_wait_seconds`, `prompt_pattern` |
-| `telnet_close_session` | Telnet | Explicitly closes an active Telnet session and finalizes log files. | `session_id` |
-| `serial_client` | Serial | Connects or sends command sequences over a local serial port or network serial bridge (`rfc2217://`, `socket://`) with timeout immunity and session logging. | `port`, `commands`, `baudrate`, `bytesize`, `parity`, `stopbits`, `newline`, `serial_session_id`, `max_wait_seconds` |
-| `serial_read_session` | Serial | Non-blocking read/polling of the background stream buffer for an active serial session. | `session_id`, `prompt_pattern`, `max_wait_seconds`, `idle_timeout` |
-| `serial_send_input` | Serial | Sends interactive input, passwords, or raw keystrokes to an active serial session. | `session_id`, `input_text`, `raw`, `newline`, `max_wait_seconds`, `prompt_pattern` |
+| `telnet_client` | Telnet | Connects or sends command sequences via Telnet with prompt waiting and session logging. | `host`, `port`, `commands`, `telnet_session_id`, `prompt_pattern`, `newline`, `max_wait_seconds`, `include_raw` |
+| `telnet_read_session` | Telnet | Non-blocking read/polling of the background stream buffer for an active Telnet session. | `session_id`, `prompt_pattern`, `max_wait_seconds`, `idle_timeout`, `include_raw` |
+| `telnet_send_input` | Telnet | Sends interactive input or raw keystrokes to an active Telnet session. | `session_id`, `input_text`, `raw`, `newline`, `max_wait_seconds`, `prompt_pattern`, `include_raw` |
+| `telnet_close_session` | Telnet | Explicitly closes an active Telnet session and finalizes log files. | `session_id`, `include_raw` |
+| `serial_client` | Serial | Connects or sends command sequences over a local serial port or network serial bridge (`rfc2217://`, `socket://`) with timeout immunity and session logging. | `port`, `commands`, `baudrate`, `bytesize`, `parity`, `stopbits`, `newline`, `serial_session_id`, `max_wait_seconds`, `include_raw` |
+| `serial_read_session` | Serial | Non-blocking read/polling of the background stream buffer for an active serial session. | `session_id`, `prompt_pattern`, `max_wait_seconds`, `idle_timeout`, `include_raw` |
+| `serial_send_input` | Serial | Sends interactive input, passwords, or raw keystrokes to an active serial session. | `session_id`, `input_text`, `raw`, `newline`, `max_wait_seconds`, `prompt_pattern`, `include_raw` |
 | `serial_set_speed` | Serial | Dynamically reconfigures baud rate and framing on an active serial session without reconnecting. | `session_id`, `baudrate`, `bytesize`, `parity`, `stopbits` |
-| `serial_send_break` | Serial | Sends an RS-232 hardware Break condition (~250ms) locally or over RFC 2217 to halt a running system into console mode (`>>>`). | `session_id`, `duration`, `prompt_pattern`, `max_wait_seconds` |
+| `serial_send_break` | Serial | Sends an RS-232 hardware Break condition (~250ms) locally or over RFC 2217 to halt a running system into console mode (`>>>`). | `session_id`, `duration`, `prompt_pattern`, `max_wait_seconds`, `include_raw` |
 | `serial_list_ports` | Serial | Enumerates available hardware serial and USB-UART ports on the host system. | *(None)* |
-| `serial_close_session` | Serial | Explicitly closes an active serial session and finalizes log files. | `session_id` |
+| `serial_close_session` | Serial | Explicitly closes an active serial session and finalizes log files. | `session_id`, `include_raw` |
 | `list_sessions` | Unified | Lists all active terminal sessions (both Telnet and Serial) with protocol and byte statistics. | *(None)* |
 | `telnet_list_sessions` | Unified | Backward-compatible alias for `list_sessions`. | *(None)* |
+
+**Result size (v0.9.0).** Results leave out what carries no information. `include_raw`
+(default false, every stream tool) adds the exact bytes as base64; `full_screen`
+(default false, the three screen tools) keeps trailing blank screen lines. See
+[Version 0.9.0](#version-090) and [docs/TOKEN_EFFICIENCY.md](docs/TOKEN_EFFICIENCY.md).
 
 **Default `prompt_pattern` (v0.6.1+)**: when a tool takes `prompt_pattern` but
 none is given, it falls back to a default built for OpenVMS DCL and its
@@ -253,7 +292,7 @@ print(screen.screen_text)
 
 # Check which lines contain highlighted / reverse-video selections:
 print("Highlighted lines:", screen.highlighted_lines)
-print("Annotated view:\n", screen.annotated_text)
+print("Annotated view:\n", screen.annotated_text)  # absent (None) when same as screen_text
 ```
 
 ### 2. Navigating with Keys (`terminal_send_key`)
@@ -560,7 +599,10 @@ Readable text is incremental UTF-8 with replacement for invalid sequences.
 `prompt_matched` is JSON-safe display text using the same replacement policy;
 regex offsets and authoritative payload bytes remain reversible and exact. A
 split character may appear in a later text reply than its first raw byte.
-Use **base64**, not UTF-8 re-encoding of the text, for byte counts and hashes:
+Use **base64**, not UTF-8 re-encoding of the text, for byte counts and hashes.
+Since v0.9.0 the base64 fields are returned only when the call passes
+`include_raw: true`, or automatically (with `raw_included_reason`) when the text
+cannot carry the bytes of that delivery (invalid or split UTF-8):
 
 | Delivery | Exact payload field |
 | --- | --- |
@@ -569,7 +611,7 @@ Use **base64**, not UTF-8 re-encoding of the text, for byte counts and hashes:
 | Client call with `close_session=True` | `final_output_raw_base64` |
 
 The base64 field and its readable text are two representations of one delivery;
-do not concatenate both. `new_bytes_count` counts raw payload bytes, and
+do not concatenate both. With `include_raw` and an empty delivery the field is `""`. `new_bytes_count` counts raw payload bytes, and
 `total_bytes_received` counts all ingested payload bytes. Existing tool names and
 arguments remain available. `return_full_buffer=True` is a deprecated alias for
 reading unread bytes; use the transcript if history is needed.
