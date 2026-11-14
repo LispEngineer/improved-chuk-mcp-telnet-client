@@ -1782,6 +1782,21 @@ def _annotation(screen_text: str, annotated_text: Optional[str]) -> Optional[str
     return None if annotated_text == screen_text else annotated_text
 
 
+def _present_screen(screen_text: str, annotated_text: Optional[str], full: bool):
+    """(screen_text, annotated_text) as returned to the caller.
+
+    Trailing blank lines are cut unless full is set: a 24-row screen with 10 used
+    rows otherwise sends 14 empty lines, each costing tokens. Rows are counted from
+    the top, so line numbers (highlighted_lines, cursor_row) are unchanged; rows and
+    cols still give the full size. (Trailing spaces on each line were already
+    stripped before 0.9.0 and still are.)"""
+    if not full:
+        screen_text = screen_text.rstrip("\n")
+        if annotated_text is not None:
+            annotated_text = annotated_text.rstrip("\n")
+    return screen_text, _annotation(screen_text, annotated_text)
+
+
 def _screen_sig(out: TerminalScreenOutput) -> tuple:
     """What counts as 'the screen changed': text, reverse video, cursor place and visibility."""
     return (out.screen_text, out.annotated_text, out.cursor_row, out.cursor_col, out.cursor_visible)
@@ -1808,6 +1823,8 @@ def _clamp_wait_timeout(timeout_seconds: float) -> float:
 async def terminal_get_screen(
     session_id: str,
     wait_seconds: float = 0.0,
+    full_screen: bool = False,
+    include_raw: bool = False,
 ) -> TerminalScreenOutput:
     """Inspect the rendered 2D terminal canvas, cursor position, and highlighted reverse-video text.
 
@@ -1816,7 +1833,8 @@ async def terminal_get_screen(
     use terminal_wait_for_change.
 
     annotated_text (reverse-video runs marked * [like this] *) is returned only when it
-    differs from screen_text."""
+    differs from screen_text. Trailing blank lines are left out of both; full_screen=true
+    (or include_raw=true) returns every row, rows and cols give the full size."""
     session = await _session_store.get(session_id)
     if session is None:
         raise ValueError(f"No active session found with ID '{session_id}'")
@@ -1825,7 +1843,8 @@ async def terminal_get_screen(
         await asyncio.sleep(wait_seconds)
 
     out = _read_screen(session)
-    out.annotated_text = _annotation(out.screen_text, out.annotated_text)
+    out.screen_text, out.annotated_text = _present_screen(
+        out.screen_text, out.annotated_text, full_screen or include_raw)
     return out
 
 
@@ -1834,6 +1853,8 @@ async def terminal_send_key(
     session_id: str,
     key: str,
     wait_seconds: float = 0.5,
+    full_screen: bool = False,
+    include_raw: bool = False,
 ) -> TerminalSendKeyOutput:
     """Send a keyboard key or VT escape sequence (e.g. UP, DOWN, TAB, ENTER, ESC, CTRL_Z) to a terminal session."""
     session = await _session_store.get(session_id)
@@ -1863,6 +1884,8 @@ async def terminal_send_key(
         await asyncio.sleep(wait_seconds)
 
     screen_output = _read_screen(session)
+    screen_text, annotated_text = _present_screen(
+        screen_output.screen_text, screen_output.annotated_text, full_screen or include_raw)
 
     return TerminalSendKeyOutput(
         session_id=session_id,
@@ -1870,8 +1893,8 @@ async def terminal_send_key(
         bytes_sent=repr(payload),
         success=True,
         message=f"Key '{key}' ({repr(payload)}) sent to session '{session_id}'.",
-        screen_text=screen_output.screen_text,
-        annotated_text=_annotation(screen_output.screen_text, screen_output.annotated_text),
+        screen_text=screen_text,
+        annotated_text=annotated_text,
         cursor_row=screen_output.cursor_row,
         cursor_col=screen_output.cursor_col,
         cursor_visible=screen_output.cursor_visible,
@@ -1884,6 +1907,8 @@ async def terminal_wait_for_change(
     timeout_seconds: float = 30.0,
     settle_seconds: float = 0.3,
     pattern: Optional[str] = None,
+    full_screen: bool = False,
+    include_raw: bool = False,
 ) -> TerminalWaitForChangeOutput:
     """Wait, in one call, for the terminal screen to change, then return it.
 
@@ -1893,7 +1918,10 @@ async def terminal_wait_for_change(
     With pattern (a Python regular expression searched in screen_text) it instead returns
     once the pattern is on the screen and the screen has settled, changed or not.
     Otherwise it returns the current screen at timeout_seconds (capped at 300) with
-    timed_out true. It also returns at once if the session ends."""
+    timed_out true. It also returns at once if the session ends.
+
+    Trailing blank lines are left out of screen_text unless full_screen=true (or
+    include_raw=true); annotated_text only when it differs from screen_text."""
     session = await _session_store.get(session_id)
     if session is None:
         raise ValueError(f"No active session found with ID '{session_id}'")
@@ -1944,6 +1972,9 @@ async def terminal_wait_for_change(
         bytes_received = session.total_bytes_received - bytes_at_start
         active = session.is_active
 
+    screen_text, annotated_text = _present_screen(
+        out.screen_text, out.annotated_text, full_screen or include_raw)
+
     return TerminalWaitForChangeOutput(
         session_id=session_id,
         changed=changed,
@@ -1958,8 +1989,8 @@ async def terminal_wait_for_change(
         cursor_col=out.cursor_col,
         cursor_visible=out.cursor_visible,
         cursor_char=out.cursor_char,
-        screen_text=out.screen_text,
-        annotated_text=_annotation(out.screen_text, out.annotated_text),
+        screen_text=screen_text,
+        annotated_text=annotated_text,
         highlighted_lines=out.highlighted_lines,
     )
 

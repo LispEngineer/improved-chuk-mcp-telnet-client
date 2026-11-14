@@ -329,3 +329,72 @@ def test_d_serial_results_follow_the_same_rules(tmp_path):
     finally:
         mcp.close()
         e.close()
+
+
+# ---- (e) screen text without trailing spaces / blank lines unless full_screen or include_raw --------
+
+
+def paint(mcp, e, data):
+    e.send(data)
+    wait_bytes(mcp, e, len(e.sent), 't')
+
+
+def test_e_trailing_blank_lines_are_cut_but_rows_stay_counted(peer):
+    mcp, e, _ = peer
+    connect_plain(mcp, e)
+    paint(mcp, e, b'\x1b[2J\x1b[H  first   \x1b[3;1Hthird   ')
+    screen = mcp.tool('terminal_get_screen', dict(session_id='t'))
+    assert screen['screen_text'] == '  first\n\nthird'
+    assert screen['rows'] == 24 and screen['cols'] == 80
+    full = mcp.tool('terminal_get_screen', dict(session_id='t', full_screen=True))
+    assert full['screen_text'] == '  first\n\nthird' + '\n' * 21      # all 24 rows, lines still right-trimmed
+    assert full['screen_text'].count('\n') == 23
+    raw = mcp.tool('terminal_get_screen', dict(session_id='t', include_raw=True))
+    assert raw['screen_text'] == full['screen_text']
+
+
+def test_e_blank_screen_still_states_screen_text(peer):
+    mcp, e, _ = peer
+    connect_plain(mcp, e)
+    paint(mcp, e, b'\x1b[2J\x1b[H')
+    screen = mcp.tool('terminal_get_screen', dict(session_id='t'))
+    assert screen['screen_text'] == '' and 'annotated_text' not in screen
+
+
+def test_e_annotated_text_is_trimmed_too_and_keeps_line_numbers(peer):
+    mcp, e, _ = peer
+    connect_plain(mcp, e)
+    paint(mcp, e, b'\x1b[2J\x1b[H\x1b[2;1H\x1b[7m SEL \x1b[0m  ')
+    screen = mcp.tool('terminal_get_screen', dict(session_id='t'))
+    assert screen['highlighted_lines'] == [2]
+    assert screen['annotated_text'] == '\n* [ SEL ] *'
+    assert screen['screen_text'] == '\n SEL'
+    full = mcp.tool('terminal_get_screen', dict(session_id='t', full_screen=True))
+    assert full['annotated_text'].startswith('\n* [ SEL ] *\n') and full['annotated_text'].count('\n') == 23
+
+
+def test_e_send_key_and_wait_for_change_take_full_screen(peer):
+    mcp, e, _ = peer
+    connect_plain(mcp, e)
+    paint(mcp, e, b'\x1b[2J\x1b[Hhello')
+    key = mcp.tool('terminal_send_key', dict(session_id='t', key='SPACE', wait_seconds=0.1))
+    assert key['screen_text'] == 'hello'
+    key = mcp.tool('terminal_send_key', dict(session_id='t', key='SPACE', wait_seconds=0.1, full_screen=True))
+    assert key['screen_text'].count('\n') == 23
+    waited = mcp.tool('terminal_wait_for_change', dict(session_id='t', timeout_seconds=0.3,
+                                                       settle_seconds=0.05))
+    assert waited['screen_text'] == 'hello'
+    waited = mcp.tool('terminal_wait_for_change', dict(session_id='t', timeout_seconds=0.3,
+                                                       settle_seconds=0.05, include_raw=True))
+    assert waited['screen_text'].count('\n') == 23
+
+
+def test_e_wait_pattern_still_searches_the_whole_screen(peer):
+    """A pattern anchored to the end of the screen sees the full text, not the trimmed result."""
+    mcp, e, _ = peer
+    connect_plain(mcp, e)
+    paint(mcp, e, b'\x1b[2J\x1b[H\x1b[24;1Hbottom')
+    waited = mcp.tool('terminal_wait_for_change', dict(session_id='t', timeout_seconds=2,
+                                                       settle_seconds=0.05, pattern=r'bottom\n?\Z'))
+    assert waited['pattern_matched'] == 'bottom'
+    assert waited['screen_text'].endswith('bottom')
