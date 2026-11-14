@@ -746,6 +746,11 @@ class StreamText(str):
         return base64.b64encode(self.raw).decode("ascii")
 
 
+def _raw(out, include_raw):
+    """The base64 of a delivery's exact bytes, only when the caller asked for them."""
+    return out.base64 if include_raw else None
+
+
 def _take_pending(session, length=None, final=False):
     """Caller holds session.lock. No await between dequeue and result assembly."""
     length = len(session.pending_output) if length is None else length
@@ -896,8 +901,13 @@ async def telnet_client_tool(
     log_dir: Optional[str] = None,
     enable_logging: bool = True,
     timestamp_chunks: bool = False,
+    include_raw: bool = False,
 ) -> TelnetClientOutput:
-    """Execute commands on a remote system via Telnet with timeout immunity and session logging."""
+    """Execute commands on a remote system via Telnet with timeout immunity and session logging.
+
+    By default the result carries the decoded text only; include_raw=True adds the
+    exact bytes as base64 (raw_base64 and the other *_raw_base64 fields).
+    """
     actual_session_id = telnet_session_id or f"telnet_{int(time.time())}_{uuid.uuid4().hex[:6]}"
     session = await _session_store.get(actual_session_id)
     initial_banner = ""
@@ -966,7 +976,7 @@ async def telnet_client_tool(
         )
 
         cleaned_response = out
-        responses.append(CommandResponse(command=cmd, response=cleaned_response, raw_base64=out.base64))
+        responses.append(CommandResponse(command=cmd, response=cleaned_response, raw_base64=_raw(out, include_raw)))
 
         if not completed:
             all_completed = False
@@ -989,9 +999,11 @@ async def telnet_client_tool(
         host=host,
         port=port,
         initial_banner=initial_banner,
-        initial_banner_raw_base64=initial_banner.base64 if isinstance(initial_banner, StreamText) else "",
+        initial_banner_raw_base64=(
+            (initial_banner.base64 if isinstance(initial_banner, StreamText) else "") if include_raw else None
+        ),
         final_output=final_output,
-        final_output_raw_base64=final_output.base64,
+        final_output_raw_base64=_raw(final_output, include_raw),
         responses=responses,
         session_id=actual_session_id,
         session_active=is_active,
@@ -1009,8 +1021,13 @@ async def telnet_read_session(
     prompt_pattern: Optional[str] = None,
     idle_timeout: Optional[float] = None,
     return_full_buffer: bool = False,
+    include_raw: bool = False,
 ) -> TelnetReadSessionOutput:
-    """Read unconsumed or buffered output from an active Telnet session."""
+    """Read unconsumed or buffered output from an active Telnet session.
+
+    By default the result carries the decoded text only; include_raw=True adds the
+    exact bytes as base64 (raw_base64 and the other *_raw_base64 fields).
+    """
     session = await _session_store.get(session_id)
     if session is None or not isinstance(session, TelnetSession):
         raise ValueError(f"No active Telnet session found with ID '{session_id}'")
@@ -1033,7 +1050,7 @@ async def telnet_read_session(
         port=session.port,
         output=out,
         new_bytes_count=len(out.raw),
-        raw_base64=out.base64,
+        raw_base64=_raw(out, include_raw),
         total_bytes_received=session.total_bytes_received,
         command_completed=completed,
         prompt_matched=prompt_match,
@@ -1051,8 +1068,13 @@ async def telnet_send_input(
     newline: str = "\r\n",
     max_wait_seconds: float = 5.0,
     prompt_pattern: Optional[str] = None,
+    include_raw: bool = False,
 ) -> TelnetSendInputOutput:
-    """Send interactive input or keystrokes to an active Telnet session."""
+    """Send interactive input or keystrokes to an active Telnet session.
+
+    By default the result carries the decoded text only; include_raw=True adds the
+    exact bytes as base64 (raw_base64 and the other *_raw_base64 fields).
+    """
     session = await _session_store.get(session_id)
     if session is None or not isinstance(session, TelnetSession):
         raise ValueError(f"No active Telnet session found with ID '{session_id}'")
@@ -1077,7 +1099,7 @@ async def telnet_send_input(
         session_id=session_id,
         input_sent=input_text,
         response=out,
-        raw_base64=out.base64,
+        raw_base64=_raw(out, include_raw),
         command_completed=completed,
         prompt_matched=prompt_match,
         session_active=session.is_active,
@@ -1087,14 +1109,19 @@ async def telnet_send_input(
 
 @tool(name="telnet_close_session")
 @_stream_operation("session_id")
-async def telnet_close_session(session_id: str) -> SessionCloseResponse:
-    """Close an active Telnet session."""
+async def telnet_close_session(session_id: str, include_raw: bool = False) -> SessionCloseResponse:
+    """Close an active Telnet session.
+
+    By default the result carries the decoded text only; include_raw=True adds the
+    exact bytes as base64 (raw_base64 and the other *_raw_base64 fields).
+    """
     session = await _session_store.get(session_id)
     if session:
         out = await _close_and_drain(session)
         return SessionCloseResponse(success=True, message=f"Telnet session '{session_id}' closed successfully.",
-                                    output=out, raw_base64=out.base64)
-    return SessionCloseResponse(success=False, message=f"No active session found with ID '{session_id}'.")
+                                    output=out, raw_base64=_raw(out, include_raw))
+    return SessionCloseResponse(success=False, message=f"No active session found with ID '{session_id}'.",
+                                raw_base64="" if include_raw else None)
 
 
 # ============================================================================
@@ -1123,8 +1150,13 @@ async def serial_client_tool(
     log_dir: Optional[str] = None,
     enable_logging: bool = True,
     timestamp_chunks: bool = False,
+    include_raw: bool = False,
 ) -> SerialClientOutput:
-    """Execute commands on a hardware serial/console port with timeout immunity and session logging."""
+    """Execute commands on a hardware serial/console port with timeout immunity and session logging.
+
+    By default the result carries the decoded text only; include_raw=True adds the
+    exact bytes as base64 (raw_base64 and the other *_raw_base64 fields).
+    """
     actual_session_id = serial_session_id or f"serial_{int(time.time())}_{uuid.uuid4().hex[:6]}"
     session = await _session_store.get(actual_session_id)
     initial_banner = ""
@@ -1206,7 +1238,7 @@ async def serial_client_tool(
         )
 
         cleaned_response = out
-        responses.append(CommandResponse(command=cmd, response=cleaned_response, raw_base64=out.base64))
+        responses.append(CommandResponse(command=cmd, response=cleaned_response, raw_base64=_raw(out, include_raw)))
 
         if not completed:
             all_completed = False
@@ -1229,9 +1261,11 @@ async def serial_client_tool(
         port=port,
         baudrate=session.baudrate,
         initial_banner=initial_banner,
-        initial_banner_raw_base64=initial_banner.base64 if isinstance(initial_banner, StreamText) else "",
+        initial_banner_raw_base64=(
+            (initial_banner.base64 if isinstance(initial_banner, StreamText) else "") if include_raw else None
+        ),
         final_output=final_output,
-        final_output_raw_base64=final_output.base64,
+        final_output_raw_base64=_raw(final_output, include_raw),
         responses=responses,
         session_id=actual_session_id,
         session_active=is_active,
@@ -1249,8 +1283,13 @@ async def serial_read_session(
     prompt_pattern: Optional[str] = None,
     idle_timeout: Optional[float] = None,
     return_full_buffer: bool = False,
+    include_raw: bool = False,
 ) -> SerialReadSessionOutput:
-    """Read unconsumed or buffered output from an active Serial session without sending new commands."""
+    """Read unconsumed or buffered output from an active Serial session without sending new commands.
+
+    By default the result carries the decoded text only; include_raw=True adds the
+    exact bytes as base64 (raw_base64 and the other *_raw_base64 fields).
+    """
     session = await _session_store.get(session_id)
     if session is None or not isinstance(session, SerialSession):
         raise ValueError(f"No active Serial session found with ID '{session_id}'")
@@ -1273,7 +1312,7 @@ async def serial_read_session(
         baudrate=session.baudrate,
         output=out,
         new_bytes_count=len(out.raw),
-        raw_base64=out.base64,
+        raw_base64=_raw(out, include_raw),
         total_bytes_received=session.total_bytes_received,
         command_completed=completed,
         prompt_matched=prompt_match,
@@ -1291,8 +1330,13 @@ async def serial_send_input(
     newline: str = "\r\n",
     max_wait_seconds: float = 5.0,
     prompt_pattern: Optional[str] = None,
+    include_raw: bool = False,
 ) -> SerialSendInputOutput:
-    """Send interactive input, passwords, or raw keystrokes to an active Serial session."""
+    """Send interactive input, passwords, or raw keystrokes to an active Serial session.
+
+    By default the result carries the decoded text only; include_raw=True adds the
+    exact bytes as base64 (raw_base64 and the other *_raw_base64 fields).
+    """
     session = await _session_store.get(session_id)
     if session is None or not isinstance(session, SerialSession):
         raise ValueError(f"No active Serial session found with ID '{session_id}'")
@@ -1317,7 +1361,7 @@ async def serial_send_input(
         session_id=session_id,
         input_sent=input_text,
         response=out,
-        raw_base64=out.base64,
+        raw_base64=_raw(out, include_raw),
         command_completed=completed,
         prompt_matched=prompt_match,
         session_active=session.is_active,
@@ -1332,8 +1376,13 @@ async def serial_send_break(
     duration: float = 0.25,
     max_wait_seconds: float = 5.0,
     prompt_pattern: str = r">>> ",
+    include_raw: bool = False,
 ) -> SerialSendBreakOutput:
-    """Send an RS-232 hardware Break condition (~250ms) to halt a VAX into the console prompt (>>>)."""
+    """Send an RS-232 hardware Break condition (~250ms) to halt a VAX into the console prompt (>>>).
+
+    By default the result carries the decoded text only; include_raw=True adds the
+    exact bytes as base64 (raw_base64 and the other *_raw_base64 fields).
+    """
     session = await _session_store.get(session_id)
     if session is None or not isinstance(session, SerialSession):
         raise ValueError(f"No active Serial session found with ID '{session_id}'")
@@ -1345,6 +1394,7 @@ async def serial_send_break(
             success=False,
             prompt_matched=None,
             output="",
+            raw_base64="" if include_raw else None,
             message=(
                 "Failed sending break condition: session is connected via raw TCP socket ('socket://'). "
                 "Raw TCP sockets cannot transmit RS-232 BREAK signals across the network. "
@@ -1368,6 +1418,7 @@ async def serial_send_break(
             success=False,
             prompt_matched=None,
             output="",
+            raw_base64="" if include_raw else None,
             message=f"Failed sending break condition: {e}",
         )
 
@@ -1386,7 +1437,7 @@ async def serial_send_break(
         success=completed or bool(out),
         prompt_matched=prompt_match,
         output=out,
-        raw_base64=out.base64,
+        raw_base64=_raw(out, include_raw),
         message="Break sent successfully.",
     )
 
@@ -1496,14 +1547,19 @@ async def serial_list_ports() -> SerialListPortsOutput:
 
 @tool(name="serial_close_session")
 @_stream_operation("session_id")
-async def serial_close_session(session_id: str) -> SessionCloseResponse:
-    """Close an active Serial session."""
+async def serial_close_session(session_id: str, include_raw: bool = False) -> SessionCloseResponse:
+    """Close an active Serial session.
+
+    By default the result carries the decoded text only; include_raw=True adds the
+    exact bytes as base64 (raw_base64 and the other *_raw_base64 fields).
+    """
     session = await _session_store.get(session_id)
     if session:
         out = await _close_and_drain(session)
         return SessionCloseResponse(success=True, message=f"Serial session '{session_id}' closed successfully.",
-                                    output=out, raw_base64=out.base64)
-    return SessionCloseResponse(success=False, message=f"No active session found with ID '{session_id}'.")
+                                    output=out, raw_base64=_raw(out, include_raw))
+    return SessionCloseResponse(success=False, message=f"No active session found with ID '{session_id}'.",
+                                raw_base64="" if include_raw else None)
 
 
 # ============================================================================
@@ -1702,6 +1758,11 @@ def _extract_screen_output(session: Union[TelnetSession, SerialSession]) -> Term
     )
 
 
+def _annotation(screen_text: str, annotated_text: Optional[str]) -> Optional[str]:
+    """annotated_text only when it says something screen_text does not."""
+    return None if annotated_text == screen_text else annotated_text
+
+
 def _screen_sig(out: TerminalScreenOutput) -> tuple:
     """What counts as 'the screen changed': text, reverse video, cursor place and visibility."""
     return (out.screen_text, out.annotated_text, out.cursor_row, out.cursor_col, out.cursor_visible)
@@ -1733,7 +1794,10 @@ async def terminal_get_screen(
 
     The screen is always current: a background thread reads the session as bytes arrive,
     so wait_seconds=0 shows everything received so far. To wait for the screen to change,
-    use terminal_wait_for_change."""
+    use terminal_wait_for_change.
+
+    annotated_text (reverse-video runs marked * [like this] *) is returned only when it
+    differs from screen_text."""
     session = await _session_store.get(session_id)
     if session is None:
         raise ValueError(f"No active session found with ID '{session_id}'")
@@ -1741,7 +1805,9 @@ async def terminal_get_screen(
     if wait_seconds > 0:
         await asyncio.sleep(wait_seconds)
 
-    return _read_screen(session)
+    out = _read_screen(session)
+    out.annotated_text = _annotation(out.screen_text, out.annotated_text)
+    return out
 
 
 @tool(name="terminal_send_key")
@@ -1786,7 +1852,7 @@ async def terminal_send_key(
         success=True,
         message=f"Key '{key}' ({repr(payload)}) sent to session '{session_id}'.",
         screen_text=screen_output.screen_text,
-        annotated_text=screen_output.annotated_text,
+        annotated_text=_annotation(screen_output.screen_text, screen_output.annotated_text),
         cursor_row=screen_output.cursor_row,
         cursor_col=screen_output.cursor_col,
         cursor_visible=screen_output.cursor_visible,
@@ -1874,7 +1940,7 @@ async def terminal_wait_for_change(
         cursor_visible=out.cursor_visible,
         cursor_char=out.cursor_char,
         screen_text=out.screen_text,
-        annotated_text=out.annotated_text,
+        annotated_text=_annotation(out.screen_text, out.annotated_text),
         highlighted_lines=out.highlighted_lines,
     )
 

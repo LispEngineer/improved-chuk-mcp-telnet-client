@@ -19,7 +19,20 @@ from pathlib import Path
 
 import pytest
 
-from test_m1_live_reader import Mcp
+from test_m1_live_reader import Mcp as _Mcp
+
+STREAM_TOOLS = {f'{t}_{n}' for t in ('telnet', 'serial')
+                for n in ('client', 'send_input', 'read_session', 'close_session', 'send_break')}
+
+
+class Mcp(_Mcp):
+    """0.9.0 leaves raw_base64 out unless include_raw is passed; these tests compare
+    the exact bytes, so this client asks for them on every stream call."""
+
+    def tool(self, name, args, deadline=60.0):
+        if name in STREAM_TOOLS:
+            args = dict(args, include_raw=True)
+        return super().tool(name, args, deadline)
 
 
 def payload(result, field='raw_base64'):
@@ -359,7 +372,7 @@ def test_cancel_batch_after_eof_restores_all_unreturned_bytes():
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
-        result = await tools.telnet_read_session(sid, max_wait_seconds=0)
+        result = await tools.telnet_read_session(sid, max_wait_seconds=0, include_raw=True)
         assert base64.b64decode(result.raw_base64) == b'FINAL> EOF-TAIL'
         assert (await tools.telnet_read_session(sid, max_wait_seconds=0)).output == ''
         tools._session_store._sessions.pop(sid)
@@ -390,7 +403,7 @@ def test_cancel_close_retains_session_and_pending(monkeypatch):
             await task
         assert await tools._session_store.get(sid) is session
         release.set()
-        result = await tools.telnet_read_session(sid, max_wait_seconds=0)
+        result = await tools.telnet_read_session(sid, max_wait_seconds=0, include_raw=True)
         assert base64.b64decode(result.raw_base64) == b'KEEP-ON-CANCEL'
         tools._session_store._sessions.pop(sid)
     asyncio.run(run())
@@ -406,7 +419,7 @@ def test_concurrent_consumers_never_repeat():
         session = tools.TelnetSession(MagicMock(), 'localhost', 0, time.time(), sid)
         tools._session_store._sessions[sid] = session
         tools._ingest_chunk(session, b'ONLY-ONCE', time.time())
-        results = await asyncio.gather(*(tools.telnet_read_session(sid, max_wait_seconds=0.01)
+        results = await asyncio.gather(*(tools.telnet_read_session(sid, max_wait_seconds=0.01, include_raw=True)
                                         for _ in range(8)))
         assert b''.join(base64.b64decode(r.raw_base64) for r in results) == b'ONLY-ONCE'
         tools._session_store._sessions.pop(sid)
@@ -433,7 +446,7 @@ def test_close_joins_inflight_ingest(monkeypatch):
             e.send(b'IN-FLIGHT')
             while not entered.is_set():
                 await asyncio.sleep(0.01)
-            closing = asyncio.create_task(tools.telnet_close_session('inflight'))
+            closing = asyncio.create_task(tools.telnet_close_session('inflight', include_raw=True))
             await asyncio.sleep(0.1)
             assert not closing.done()
             release.set()
@@ -594,7 +607,7 @@ def test_connection_reset_recovers_already_cooked_payload():
                     break
                 await asyncio.sleep(0.01)
             assert not session.is_active
-            result = await tools.telnet_read_session('reset', max_wait_seconds=0)
+            result = await tools.telnet_read_session('reset', max_wait_seconds=0, include_raw=True)
             assert base64.b64decode(result.raw_base64) == b'COOKED-BEFORE-RESET\x00\x11\xff'
             assert (await tools.telnet_read_session('reset', max_wait_seconds=0)).output == ''
             await tools.telnet_close_session('reset')
@@ -635,7 +648,7 @@ def test_failed_send_retains_older_unread_output():
         try:
             with pytest.raises(BrokenPipeError):
                 await tools.telnet_send_input(sid, 'C', max_wait_seconds=0)
-            result = await tools.telnet_read_session(sid, max_wait_seconds=0)
+            result = await tools.telnet_read_session(sid, max_wait_seconds=0, include_raw=True)
             assert base64.b64decode(result.raw_base64) == b'OLDER-UNREAD'
             assert (await tools.telnet_read_session(sid, max_wait_seconds=0)).output == ''
         finally:
@@ -674,7 +687,7 @@ def test_busy_close_fails_without_discard_then_retry_drains(monkeypatch):
                 if not session.reader_thread.is_alive():
                     break
                 await asyncio.sleep(0.01)
-            final = await tools.telnet_close_session('busy-close')
+            final = await tools.telnet_close_session('busy-close', include_raw=True)
             assert base64.b64decode(final.raw_base64) == b'BUSY-IN-FLIGHT'
         finally:
             release.set()

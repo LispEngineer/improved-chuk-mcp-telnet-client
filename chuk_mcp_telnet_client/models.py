@@ -1,6 +1,28 @@
 # chuk_mcp_telnet_client/models.py
-from typing import Any, Dict, List, Optional, Union
-from pydantic import BaseModel, Field
+from typing import Any, ClassVar, Dict, FrozenSet, List, Optional, Union
+from pydantic import BaseModel, Field, model_serializer
+
+
+class CompactModel(BaseModel):
+    """Result model that leaves out fields that carry no information.
+
+    The MCP server serializes a result with model_dump(), and every field it emits
+    costs the calling agent tokens. A subclass lists in OMIT_IF_NONE the optional
+    fields that are dropped from the result while they are None (for example
+    raw_base64 when the caller did not ask for it). Booleans, counts and the
+    primary text of a result are never listed, so a False, a 0 or an empty reply
+    is always stated explicitly.
+    """
+
+    OMIT_IF_NONE: ClassVar[FrozenSet[str]] = frozenset()
+
+    @model_serializer(mode="wrap")
+    def _omit_unset(self, handler):
+        data = handler(self)
+        for name in self.OMIT_IF_NONE:
+            if data.get(name, False) is None:
+                del data[name]
+        return data
 
 
 # ============================================================================
@@ -15,20 +37,24 @@ class TelnetClientInput(BaseModel):
     newline: str = Field("\r\n", description="Line terminator to append to commands (default: '\\r\\n').")
 
 
-class CommandResponse(BaseModel):
+class CommandResponse(CompactModel):
+    OMIT_IF_NONE = frozenset({"raw_base64"})
+
     command: str
     response: str
-    raw_base64: str = ""
+    raw_base64: Optional[str] = None
 
 
-class TelnetClientOutput(BaseModel):
+class TelnetClientOutput(CompactModel):
+    OMIT_IF_NONE = frozenset({"initial_banner_raw_base64", "final_output_raw_base64"})
+
     server_version: str = "0.8.0"
     host: str
     port: int
     initial_banner: str
-    initial_banner_raw_base64: str = ""
+    initial_banner_raw_base64: Optional[str] = None
     final_output: str = ""
-    final_output_raw_base64: str = ""
+    final_output_raw_base64: Optional[str] = None
     responses: List[CommandResponse]
     session_id: str
     session_active: bool
@@ -37,12 +63,14 @@ class TelnetClientOutput(BaseModel):
     log_file: Optional[str] = None
 
 
-class TelnetReadSessionOutput(BaseModel):
+class TelnetReadSessionOutput(CompactModel):
+    OMIT_IF_NONE = frozenset({"raw_base64"})
+
     session_id: str
     host: str
     port: int
     output: str
-    raw_base64: str = ""
+    raw_base64: Optional[str] = None
     new_bytes_count: int
     total_bytes_received: int
     command_completed: bool
@@ -51,11 +79,13 @@ class TelnetReadSessionOutput(BaseModel):
     log_file: Optional[str] = None
 
 
-class TelnetSendInputOutput(BaseModel):
+class TelnetSendInputOutput(CompactModel):
+    OMIT_IF_NONE = frozenset({"raw_base64"})
+
     session_id: str
     input_sent: str
     response: str
-    raw_base64: str = ""
+    raw_base64: Optional[str] = None
     command_completed: bool
     prompt_matched: Optional[str] = None
     session_active: bool
@@ -79,14 +109,16 @@ class SerialClientInput(BaseModel):
     newline: str = Field("\r\n", description="Line terminator to append to commands (default: '\\r\\n', use '\\r' for VMS serial console).")
 
 
-class SerialClientOutput(BaseModel):
+class SerialClientOutput(CompactModel):
+    OMIT_IF_NONE = frozenset({"initial_banner_raw_base64", "final_output_raw_base64"})
+
     server_version: str = "0.8.0"
     port: str
     baudrate: int
     initial_banner: str
-    initial_banner_raw_base64: str = ""
+    initial_banner_raw_base64: Optional[str] = None
     final_output: str = ""
-    final_output_raw_base64: str = ""
+    final_output_raw_base64: Optional[str] = None
     responses: List[CommandResponse]
     session_id: str
     session_active: bool
@@ -95,12 +127,14 @@ class SerialClientOutput(BaseModel):
     log_file: Optional[str] = None
 
 
-class SerialReadSessionOutput(BaseModel):
+class SerialReadSessionOutput(CompactModel):
+    OMIT_IF_NONE = frozenset({"raw_base64"})
+
     session_id: str
     port: str
     baudrate: int
     output: str
-    raw_base64: str = ""
+    raw_base64: Optional[str] = None
     new_bytes_count: int
     total_bytes_received: int
     command_completed: bool
@@ -109,23 +143,27 @@ class SerialReadSessionOutput(BaseModel):
     log_file: Optional[str] = None
 
 
-class SerialSendInputOutput(BaseModel):
+class SerialSendInputOutput(CompactModel):
+    OMIT_IF_NONE = frozenset({"raw_base64"})
+
     session_id: str
     input_sent: str
     response: str
-    raw_base64: str = ""
+    raw_base64: Optional[str] = None
     command_completed: bool
     prompt_matched: Optional[str] = None
     session_active: bool
     log_file: Optional[str] = None
 
 
-class SerialSendBreakOutput(BaseModel):
+class SerialSendBreakOutput(CompactModel):
+    OMIT_IF_NONE = frozenset({"raw_base64"})
+
     session_id: str
     success: bool
     prompt_matched: Optional[str] = None
     output: str
-    raw_base64: str = ""
+    raw_base64: Optional[str] = None
     message: str
 
 
@@ -182,10 +220,12 @@ class SessionListResponse(BaseModel):
     )
 
 
-class SessionCloseResponse(BaseModel):
+class SessionCloseResponse(CompactModel):
+    OMIT_IF_NONE = frozenset({"raw_base64"})
+
     """Final unread stream delivery at the explicit close boundary."""
     output: str = ""
-    raw_base64: str = ""
+    raw_base64: Optional[str] = None
 
     success: bool
     message: str
@@ -196,7 +236,9 @@ class SessionCloseResponse(BaseModel):
 # ============================================================================
 
 
-class TerminalScreenOutput(BaseModel):
+class TerminalScreenOutput(CompactModel):
+    OMIT_IF_NONE = frozenset({"annotated_text"})
+
     """Rendered 2D screen text matrix and visual attributes from terminal emulation."""
 
     session_id: str
@@ -207,12 +249,14 @@ class TerminalScreenOutput(BaseModel):
     cursor_visible: bool = True
     cursor_char: Optional[str] = None
     screen_text: str
-    annotated_text: str
+    annotated_text: Optional[str] = Field(None, description="Screen text with reverse-video runs marked * [like this] *; omitted when identical to screen_text.")
     highlighted_lines: List[int]
     server_version: str = "0.8.0"
 
 
-class TerminalWaitForChangeOutput(BaseModel):
+class TerminalWaitForChangeOutput(CompactModel):
+    OMIT_IF_NONE = frozenset({"annotated_text"})
+
     """Result of terminal_wait_for_change: why the wait ended, and the screen at that moment."""
 
     session_id: str
@@ -229,12 +273,14 @@ class TerminalWaitForChangeOutput(BaseModel):
     cursor_visible: bool = True
     cursor_char: Optional[str] = None
     screen_text: str
-    annotated_text: str
+    annotated_text: Optional[str] = Field(None, description="Screen text with reverse-video runs marked * [like this] *; omitted when identical to screen_text.")
     highlighted_lines: List[int]
     server_version: str = "0.8.0"
 
 
-class TerminalSendKeyOutput(BaseModel):
+class TerminalSendKeyOutput(CompactModel):
+    OMIT_IF_NONE = frozenset({"annotated_text"})
+
     """Result of sending a virtual key or escape sequence to a terminal session."""
 
     session_id: str

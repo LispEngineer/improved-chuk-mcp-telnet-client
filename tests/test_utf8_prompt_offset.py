@@ -8,7 +8,7 @@ import select
 
 import pytest
 
-from test_m1_live_reader import Mcp
+from test_lossless_stream import Mcp
 from test_lossless_stream import Endpoint, connect, payload, read, wait_bytes
 
 
