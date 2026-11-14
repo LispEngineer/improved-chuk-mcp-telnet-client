@@ -746,9 +746,32 @@ class StreamText(str):
         return base64.b64encode(self.raw).decode("ascii")
 
 
-def _raw(out, include_raw):
-    """The base64 of a delivery's exact bytes, only when the caller asked for them."""
-    return out.base64 if include_raw else None
+RAW_INCLUDED_REASON = "invalid_or_split_utf8"
+
+
+def _text_is_exact(out) -> bool:
+    """True when the returned text is a faithful UTF-8 rendering of this delivery's bytes.
+
+    It is not when the stream held invalid UTF-8 (each bad byte became U+FFFD) or a
+    UTF-8 character split across two deliveries (the incomplete tail stays with the
+    decoder for the next delivery, so this text omits bytes that are in raw, and
+    the next text holds a character whose first bytes are not in its raw)."""
+    return out.encode("utf-8") == out.raw
+
+
+def _raw_fields(out, include_raw, prefix=""):
+    """The raw_base64 result field(s) for one delivery.
+
+    Present when the caller passed include_raw, and also, whatever include_raw says,
+    when the text cannot stand for the bytes (raw_included_reason then says why).
+    Empty otherwise: the caller gets the readable text only."""
+    exact = not isinstance(out, StreamText) or _text_is_exact(out)
+    if not include_raw and exact:
+        return {}
+    fields = {f"{prefix}raw_base64": out.base64 if isinstance(out, StreamText) else ""}
+    if not include_raw:
+        fields["raw_included_reason"] = RAW_INCLUDED_REASON
+    return fields
 
 
 def _take_pending(session, length=None, final=False):
@@ -976,7 +999,7 @@ async def telnet_client_tool(
         )
 
         cleaned_response = out
-        responses.append(CommandResponse(command=cmd, response=cleaned_response, raw_base64=_raw(out, include_raw)))
+        responses.append(CommandResponse(command=cmd, response=cleaned_response, **_raw_fields(out, include_raw)))
 
         if not completed:
             all_completed = False
@@ -999,11 +1022,9 @@ async def telnet_client_tool(
         host=host,
         port=port,
         initial_banner=initial_banner,
-        initial_banner_raw_base64=(
-            (initial_banner.base64 if isinstance(initial_banner, StreamText) else "") if include_raw else None
-        ),
         final_output=final_output,
-        final_output_raw_base64=_raw(final_output, include_raw),
+        **{**_raw_fields(initial_banner, include_raw, "initial_banner_"),
+           **_raw_fields(final_output, include_raw, "final_output_")},
         responses=responses,
         session_id=actual_session_id,
         session_active=is_active,
@@ -1050,7 +1071,7 @@ async def telnet_read_session(
         port=session.port,
         output=out,
         new_bytes_count=len(out.raw),
-        raw_base64=_raw(out, include_raw),
+        **_raw_fields(out, include_raw),
         total_bytes_received=session.total_bytes_received,
         command_completed=completed,
         prompt_matched=prompt_match,
@@ -1099,7 +1120,7 @@ async def telnet_send_input(
         session_id=session_id,
         input_sent=input_text,
         response=out,
-        raw_base64=_raw(out, include_raw),
+        **_raw_fields(out, include_raw),
         command_completed=completed,
         prompt_matched=prompt_match,
         session_active=session.is_active,
@@ -1119,7 +1140,7 @@ async def telnet_close_session(session_id: str, include_raw: bool = False) -> Se
     if session:
         out = await _close_and_drain(session)
         return SessionCloseResponse(success=True, message=f"Telnet session '{session_id}' closed successfully.",
-                                    output=out, raw_base64=_raw(out, include_raw))
+                                    output=out, **_raw_fields(out, include_raw))
     return SessionCloseResponse(success=False, message=f"No active session found with ID '{session_id}'.",
                                 raw_base64="" if include_raw else None)
 
@@ -1238,7 +1259,7 @@ async def serial_client_tool(
         )
 
         cleaned_response = out
-        responses.append(CommandResponse(command=cmd, response=cleaned_response, raw_base64=_raw(out, include_raw)))
+        responses.append(CommandResponse(command=cmd, response=cleaned_response, **_raw_fields(out, include_raw)))
 
         if not completed:
             all_completed = False
@@ -1261,11 +1282,9 @@ async def serial_client_tool(
         port=port,
         baudrate=session.baudrate,
         initial_banner=initial_banner,
-        initial_banner_raw_base64=(
-            (initial_banner.base64 if isinstance(initial_banner, StreamText) else "") if include_raw else None
-        ),
         final_output=final_output,
-        final_output_raw_base64=_raw(final_output, include_raw),
+        **{**_raw_fields(initial_banner, include_raw, "initial_banner_"),
+           **_raw_fields(final_output, include_raw, "final_output_")},
         responses=responses,
         session_id=actual_session_id,
         session_active=is_active,
@@ -1312,7 +1331,7 @@ async def serial_read_session(
         baudrate=session.baudrate,
         output=out,
         new_bytes_count=len(out.raw),
-        raw_base64=_raw(out, include_raw),
+        **_raw_fields(out, include_raw),
         total_bytes_received=session.total_bytes_received,
         command_completed=completed,
         prompt_matched=prompt_match,
@@ -1361,7 +1380,7 @@ async def serial_send_input(
         session_id=session_id,
         input_sent=input_text,
         response=out,
-        raw_base64=_raw(out, include_raw),
+        **_raw_fields(out, include_raw),
         command_completed=completed,
         prompt_matched=prompt_match,
         session_active=session.is_active,
@@ -1437,7 +1456,7 @@ async def serial_send_break(
         success=completed or bool(out),
         prompt_matched=prompt_match,
         output=out,
-        raw_base64=_raw(out, include_raw),
+        **_raw_fields(out, include_raw),
         message="Break sent successfully.",
     )
 
@@ -1557,7 +1576,7 @@ async def serial_close_session(session_id: str, include_raw: bool = False) -> Se
     if session:
         out = await _close_and_drain(session)
         return SessionCloseResponse(success=True, message=f"Serial session '{session_id}' closed successfully.",
-                                    output=out, raw_base64=_raw(out, include_raw))
+                                    output=out, **_raw_fields(out, include_raw))
     return SessionCloseResponse(success=False, message=f"No active session found with ID '{session_id}'.",
                                 raw_base64="" if include_raw else None)
 

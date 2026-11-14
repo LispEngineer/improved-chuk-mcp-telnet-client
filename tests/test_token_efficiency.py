@@ -148,3 +148,94 @@ def test_b_wait_for_change_still_sees_a_reverse_video_only_change(peer):
                                                        settle_seconds=0.1))
     assert waited['changed'] is True
     assert waited['annotated_text'].startswith('* [MENU] *')
+
+
+# ---- (c) raw_base64 is included automatically when the text cannot carry the bytes ----------------
+
+
+def test_c_invalid_utf8_includes_raw_and_says_why(peer):
+    mcp, e, tmp = peer
+    mcp.tool('telnet_client', dict(host='127.0.0.1', port=e.port, commands=[], telnet_session_id='t',
+                                   response_wait=0.3))
+    e.send(b'BAD\x80\x81\xc3(\x1b[?25h\r\nEND> ')
+    wait_bytes(mcp, e, len(e.sent), 't')
+    r = mcp.tool('telnet_read_session', dict(session_id='t', max_wait_seconds=0))
+    assert base64.b64decode(r['raw_base64']) == b'BAD\x80\x81\xc3(\x1b[?25h\r\nEND> '
+    assert r['raw_included_reason'] == 'invalid_or_split_utf8'
+    assert '�' in r['output']
+    # an exact delivery afterwards is plain again
+    e.send(b'clean \xe2\x82\xac\r\n')
+    wait_bytes(mcp, e, len(e.sent), 't')
+    r = mcp.tool('telnet_read_session', dict(session_id='t', max_wait_seconds=0))
+    assert r['output'] == 'clean €\r\n' and has_raw(r) == [] and 'raw_included_reason' not in r
+
+
+def test_c_include_raw_true_has_no_reason_even_when_inexact(peer):
+    mcp, e, _ = peer
+    mcp.tool('telnet_client', dict(host='127.0.0.1', port=e.port, commands=[], telnet_session_id='t',
+                                   response_wait=0.3))
+    e.send(b'\xff\x80')
+    wait_bytes(mcp, e, len(e.sent), 't')
+    r = mcp.tool('telnet_read_session', dict(session_id='t', max_wait_seconds=0, include_raw=True))
+    assert base64.b64decode(r['raw_base64']) == b'\xff\x80' and 'raw_included_reason' not in r
+
+
+def test_c_character_split_across_deliveries_is_flagged_on_both_sides(peer):
+    mcp, e, _ = peer
+    mcp.tool('telnet_client', dict(host='127.0.0.1', port=e.port, commands=[], telnet_session_id='t',
+                                   response_wait=0.3))
+    e.send(b'euro \xe2\x82')
+    wait_bytes(mcp, e, len(e.sent), 't')
+    first = mcp.tool('telnet_read_session', dict(session_id='t', max_wait_seconds=0))
+    assert first['output'] == 'euro ' and first['raw_included_reason'] == 'invalid_or_split_utf8'
+    e.send(b'\xac done')
+    wait_bytes(mcp, e, len(e.sent), 't')
+    second = mcp.tool('telnet_read_session', dict(session_id='t', max_wait_seconds=0))
+    assert second['output'] == '€ done' and second['raw_included_reason'] == 'invalid_or_split_utf8'
+    joined = base64.b64decode(first['raw_base64']) + base64.b64decode(second['raw_base64'])
+    assert joined == b'euro \xe2\x82\xac done'
+
+
+def test_c_command_responses_and_banner_carry_their_own_raw(tmp_path):
+    e = Endpoint()
+    mcp = Mcp(str(tmp_path))
+    try:
+        opening = mcp.tool('telnet_client', dict(host='127.0.0.1', port=e.port, commands=['C1'],
+                                                 telnet_session_id='t', response_wait=0.3,
+                                                 prompt_pattern=r'P> '))
+        assert has_raw(opening) == [] and 'raw_included_reason' not in opening
+        e.send(b'\x80 more\r\nQ> ')
+        wait_bytes(mcp, e, len(e.sent), 't')
+        r = mcp.tool('telnet_client', dict(host='127.0.0.1', port=e.port, commands=['C2'],
+                                           telnet_session_id='t', prompt_pattern=r'P> ',
+                                           close_session=True))
+        first = r['responses'][0]
+        assert first['raw_included_reason'] == 'invalid_or_split_utf8'
+        assert base64.b64decode(first['raw_base64']).startswith(b'TAIL\r\n\x80 more')
+    finally:
+        mcp.close()
+        e.close()
+
+
+def test_c_close_session_flags_a_split_character(peer):
+    mcp, e, _ = peer
+    mcp.tool('telnet_client', dict(host='127.0.0.1', port=e.port, commands=[], telnet_session_id='t',
+                                   response_wait=0.3))
+    e.send(b'tail\xe2')
+    wait_bytes(mcp, e, len(e.sent), 't')
+    closed = mcp.tool('telnet_close_session', dict(session_id='t'))
+    assert base64.b64decode(closed['raw_base64']) == b'tail\xe2'
+    assert closed['raw_included_reason'] == 'invalid_or_split_utf8'
+
+
+def test_c_exact_bytes_stay_in_the_raw_transcript_without_include_raw(peer):
+    mcp, e, tmp = peer
+    mcp.tool('telnet_client', dict(host='127.0.0.1', port=e.port, commands=[], telnet_session_id='t',
+                                   response_wait=0.3))
+    e.send(b'\x80\xfe\xc3(\x1b[1m ok \xe2\x82\xac\r\n')
+    wait_bytes(mcp, e, len(e.sent), 't')
+    mcp.tool('telnet_read_session', dict(session_id='t', max_wait_seconds=0))
+    mcp.tool('telnet_close_session', dict(session_id='t'))
+    transcripts = list(tmp.glob('*.log.raw'))
+    assert len(transcripts) == 1
+    assert transcripts[0].read_bytes() == bytes(e.sent)

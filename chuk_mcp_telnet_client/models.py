@@ -38,15 +38,16 @@ class TelnetClientInput(BaseModel):
 
 
 class CommandResponse(CompactModel):
-    OMIT_IF_NONE = frozenset({"raw_base64"})
+    OMIT_IF_NONE = frozenset({"raw_base64", "raw_included_reason"})
 
     command: str
     response: str
     raw_base64: Optional[str] = None
+    raw_included_reason: Optional[str] = Field(None, description="Set when raw_base64 is present although include_raw was not passed: the text cannot stand for the bytes (invalid or split UTF-8).")
 
 
 class TelnetClientOutput(CompactModel):
-    OMIT_IF_NONE = frozenset({"initial_banner_raw_base64", "final_output_raw_base64"})
+    OMIT_IF_NONE = frozenset({"initial_banner_raw_base64", "final_output_raw_base64", "raw_included_reason"})
 
     server_version: str = "0.8.0"
     host: str
@@ -55,6 +56,7 @@ class TelnetClientOutput(CompactModel):
     initial_banner_raw_base64: Optional[str] = None
     final_output: str = ""
     final_output_raw_base64: Optional[str] = None
+    raw_included_reason: Optional[str] = Field(None, description="Set when raw_base64 is present although include_raw was not passed: the text cannot stand for the bytes (invalid or split UTF-8).")
     responses: List[CommandResponse]
     session_id: str
     session_active: bool
@@ -64,13 +66,14 @@ class TelnetClientOutput(CompactModel):
 
 
 class TelnetReadSessionOutput(CompactModel):
-    OMIT_IF_NONE = frozenset({"raw_base64"})
+    OMIT_IF_NONE = frozenset({"raw_base64", "raw_included_reason"})
 
     session_id: str
     host: str
     port: int
     output: str
     raw_base64: Optional[str] = None
+    raw_included_reason: Optional[str] = Field(None, description="Set when raw_base64 is present although include_raw was not passed: the text cannot stand for the bytes (invalid or split UTF-8).")
     new_bytes_count: int
     total_bytes_received: int
     command_completed: bool
@@ -80,12 +83,13 @@ class TelnetReadSessionOutput(CompactModel):
 
 
 class TelnetSendInputOutput(CompactModel):
-    OMIT_IF_NONE = frozenset({"raw_base64"})
+    OMIT_IF_NONE = frozenset({"raw_base64", "raw_included_reason"})
 
     session_id: str
     input_sent: str
     response: str
     raw_base64: Optional[str] = None
+    raw_included_reason: Optional[str] = Field(None, description="Set when raw_base64 is present although include_raw was not passed: the text cannot stand for the bytes (invalid or split UTF-8).")
     command_completed: bool
     prompt_matched: Optional[str] = None
     session_active: bool
@@ -110,7 +114,7 @@ class SerialClientInput(BaseModel):
 
 
 class SerialClientOutput(CompactModel):
-    OMIT_IF_NONE = frozenset({"initial_banner_raw_base64", "final_output_raw_base64"})
+    OMIT_IF_NONE = frozenset({"initial_banner_raw_base64", "final_output_raw_base64", "raw_included_reason"})
 
     server_version: str = "0.8.0"
     port: str
@@ -119,6 +123,7 @@ class SerialClientOutput(CompactModel):
     initial_banner_raw_base64: Optional[str] = None
     final_output: str = ""
     final_output_raw_base64: Optional[str] = None
+    raw_included_reason: Optional[str] = Field(None, description="Set when raw_base64 is present although include_raw was not passed: the text cannot stand for the bytes (invalid or split UTF-8).")
     responses: List[CommandResponse]
     session_id: str
     session_active: bool
@@ -128,13 +133,14 @@ class SerialClientOutput(CompactModel):
 
 
 class SerialReadSessionOutput(CompactModel):
-    OMIT_IF_NONE = frozenset({"raw_base64"})
+    OMIT_IF_NONE = frozenset({"raw_base64", "raw_included_reason"})
 
     session_id: str
     port: str
     baudrate: int
     output: str
     raw_base64: Optional[str] = None
+    raw_included_reason: Optional[str] = Field(None, description="Set when raw_base64 is present although include_raw was not passed: the text cannot stand for the bytes (invalid or split UTF-8).")
     new_bytes_count: int
     total_bytes_received: int
     command_completed: bool
@@ -144,12 +150,13 @@ class SerialReadSessionOutput(CompactModel):
 
 
 class SerialSendInputOutput(CompactModel):
-    OMIT_IF_NONE = frozenset({"raw_base64"})
+    OMIT_IF_NONE = frozenset({"raw_base64", "raw_included_reason"})
 
     session_id: str
     input_sent: str
     response: str
     raw_base64: Optional[str] = None
+    raw_included_reason: Optional[str] = Field(None, description="Set when raw_base64 is present although include_raw was not passed: the text cannot stand for the bytes (invalid or split UTF-8).")
     command_completed: bool
     prompt_matched: Optional[str] = None
     session_active: bool
@@ -157,13 +164,14 @@ class SerialSendInputOutput(CompactModel):
 
 
 class SerialSendBreakOutput(CompactModel):
-    OMIT_IF_NONE = frozenset({"raw_base64"})
+    OMIT_IF_NONE = frozenset({"raw_base64", "raw_included_reason"})
 
     session_id: str
     success: bool
     prompt_matched: Optional[str] = None
     output: str
     raw_base64: Optional[str] = None
+    raw_included_reason: Optional[str] = Field(None, description="Set when raw_base64 is present although include_raw was not passed: the text cannot stand for the bytes (invalid or split UTF-8).")
     message: str
 
 
@@ -221,11 +229,12 @@ class SessionListResponse(BaseModel):
 
 
 class SessionCloseResponse(CompactModel):
-    OMIT_IF_NONE = frozenset({"raw_base64"})
+    OMIT_IF_NONE = frozenset({"raw_base64", "raw_included_reason"})
 
     """Final unread stream delivery at the explicit close boundary."""
     output: str = ""
     raw_base64: Optional[str] = None
+    raw_included_reason: Optional[str] = Field(None, description="Set when raw_base64 is present although include_raw was not passed: the text cannot stand for the bytes (invalid or split UTF-8).")
 
     success: bool
     message: str
