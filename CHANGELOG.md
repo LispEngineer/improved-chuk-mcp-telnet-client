@@ -1,5 +1,57 @@
 # Changelog
 
+## 0.9.1
+
+Opt-in input log, requested by vms-savage for SAVAGE playtest timing. **Nothing
+changes unless a session asks for it:** `log_input` is off by default, results and
+defaults are as in 0.9.0 (the token savings stay), and `<session>.log.raw` still
+holds received bytes only.
+
+### API changes
+
+* `log_input: bool | None = None` on `telnet_client`, `serial_client`,
+  `telnet_send_input`, `serial_send_input` and `terminal_send_key`. `true` turns the
+  session's input log on (when the session is opened, or on any later call), `false`
+  turns it off, and omitted leaves the session's setting alone. It is per session and
+  applies to every send of that session, whichever tool makes it: the commands of
+  `telnet_client` / `serial_client`, `*_send_input`, and `terminal_send_key`.
+  (`serial_send_break`, the automatic VT query answers and NAWS are not input and are
+  not logged.)
+* Each send writes one record to the session transcript `<log>`:
+  `[2026-11-15T21:40:12.481-05:00] [INPUT] SHOW TIME`. The stamp is in milliseconds and
+  comes from `time.time()`, the clock that stamps received-output records, so a reply time
+  is the gap from an `[INPUT]` record to the next received record. It is taken just
+  before the bytes are written. The text is the command as given (newline implied); a
+  `raw: true` send is marked `(raw)`, control characters are shown as `\r`, `\n`, `\t`,
+  `\xNN`, and `terminal_send_key` logs a named key by name (`<UP>`, `<TAB>`, `<CTRL_Z>`)
+  and a literal one-character key quoted (`"x"`, `" "`).
+* **Turning the input log on also stamps the session's received-output records** (as
+  `timestamp_chunks: true` does): an unstamped stream has no clock to compare an
+  `[INPUT]` stamp with. Opening a session with `log_input: true` stamps from the banner on.
+* **Never logs a send that follows a password prompt.** If the last non-blank line of the
+  most recently received text contains `Password:` (any case; this includes the VMS
+  `Old password:` and `New password:`, and `Password for user:`) or `Verification:`, the
+  record is `[INPUT] (suppressed: password prompt)`, with its timestamp and without the
+  text. The pattern is the documented constant `PASSWORD_PROMPT_PATTERN` in `tools.py`;
+  the check looks at the last line of up to 512 received characters, so a prompt that
+  arrives in a chunk with other text, or split across chunks, is found, and a hidden-echo
+  prompt followed by echoed `*` is still a password prompt. The next send after the
+  host has gone on (for example to `$ `) is logged again. When unsure it suppresses.
+* `.log.raw` is unchanged: input never goes into it.
+* The transcript header says `v0.9.1`; `server_version` is `0.9.1`.
+
+### Notes
+
+* Stamps of received records have microseconds, `[INPUT]` stamps milliseconds (cut, not
+  rounded), so the gap is never understated. An [INPUT] and a received record within
+  about a millisecond of each other can be written to the file in the other order.
+* The file has no record of input for sessions that never set `log_input`, as in 0.8.0
+  and 0.9.0.
+
+### Changes accepted from the launching session
+
+* None so far.
+
 ## 0.9.0
 
 Token-efficient results. **This changes the default output of the stream and screen

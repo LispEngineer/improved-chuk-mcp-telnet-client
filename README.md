@@ -42,6 +42,55 @@ A unified **Model Context Protocol (MCP)** Terminal Communications Server design
 
 ## Release History & Changes
 
+### Version 0.9.1
+
+**Opt-in input log (`log_input`).** Off by default; nothing else changes (0.9.0's
+token savings stay, `.log.raw` still holds received bytes only).
+
+* `log_input: true` on `telnet_client` / `serial_client` (when the session is opened,
+  or on a later call), or on `telnet_send_input`, `serial_send_input` or
+  `terminal_send_key` switches the session's input log on; `false` switches it off;
+  omitted leaves it alone.
+* Every send of that session (client commands, `*_send_input`, `terminal_send_key`) then
+  writes `[<ISO-8601 time, milliseconds>] [INPUT] <text>` to the transcript `<session>.log`.
+  The stamp uses the clock of the received-output records, so a reply time is the gap to
+  the next received record. Turning it on also stamps received records, as
+  `timestamp_chunks` does. A named key is logged by name (`<UP>`, `<CTRL_Z>`), a
+  literal key quoted (`"x"`), a `raw` send marked `(raw)`.
+* **A send that follows a password prompt is never logged**: if the most recent received
+  text ends in a line holding `Password:` (any case, so also `Old password:`,
+  `New password:`), or `Verification:`, the record reads
+  `[INPUT] (suppressed: password prompt)`, with a timestamp and no text. The pattern is
+  `PASSWORD_PROMPT_PATTERN` in `tools.py`.
+
+Example (fake host):
+
+```text
+[2026-11-15T21:37:57.659303-05:00] [STREAM DATA]
+
+Welcome to the fake host
+$ 
+----------------------------------------
+[2026-11-15T21:37:57.679-05:00] [INPUT] USER
+[2026-11-15T21:37:57.679899-05:00] [STREAM DATA]
+
+Password: 
+----------------------------------------
+[2026-11-15T21:37:58.220-05:00] [INPUT] (suppressed: password prompt)
+[2026-11-15T21:37:58.221034-05:00] [STREAM DATA]
+
+Logged in
+$ 
+----------------------------------------
+[2026-11-15T21:37:58.741-05:00] [INPUT] SHOW TIME
+[2026-11-15T21:37:58.792315-05:00] [STREAM DATA]
+
+   4-SEP-2026 23:30:00
+$ 
+----------------------------------------
+[2026-11-15T21:37:58.822-05:00] [INPUT] <UP>
+```
+
 ### Version 0.9.0
 
 **Token-efficient results. This changes the default output of many tools; read the
@@ -238,21 +287,25 @@ The server exposes 17 MCP tools across Telnet, Serial, and Visual Terminal categ
 | :--- | :--- | :--- | :--- |
 | `terminal_get_screen` | Visual | Inspects the rendered 2D terminal canvas, cursor position, and highlighted reverse-video text. Always current (v0.7.1): `wait_seconds=0` shows everything received so far. | `session_id`, `wait_seconds`, `full_screen` |
 | `terminal_wait_for_change` | Visual | Waits in one call until the screen changes since the last screen read (or shows `pattern`) and has been quiet for `settle_seconds`, then returns it; or returns at `timeout_seconds` (capped at 300). | `session_id`, `timeout_seconds`, `settle_seconds`, `pattern`, `full_screen` |
-| `terminal_send_key` | Visual | Sends named keyboard keys or VT escape sequences (e.g. `UP`, `DOWN`, `TAB`, `ENTER`, `ESC`, `CTRL_Z`) and returns the updated screen. | `session_id`, `key`, `wait_seconds`, `full_screen` |
+| `terminal_send_key` | Visual | Sends named keyboard keys or VT escape sequences (e.g. `UP`, `DOWN`, `TAB`, `ENTER`, `ESC`, `CTRL_Z`) and returns the updated screen. | `session_id`, `key`, `wait_seconds`, `full_screen`, `log_input` |
 | `terminal_resize` | Visual | Dynamically resizes the virtual terminal canvas and sends RFC 1073 Telnet NAWS window resize negotiation. | `session_id`, `cols`, `rows` |
-| `telnet_client` | Telnet | Connects or sends command sequences via Telnet with prompt waiting and session logging. | `host`, `port`, `commands`, `telnet_session_id`, `prompt_pattern`, `newline`, `max_wait_seconds`, `include_raw` |
+| `telnet_client` | Telnet | Connects or sends command sequences via Telnet with prompt waiting and session logging. | `host`, `port`, `commands`, `telnet_session_id`, `prompt_pattern`, `newline`, `max_wait_seconds`, `include_raw`, `log_input` |
 | `telnet_read_session` | Telnet | Non-blocking read/polling of the background stream buffer for an active Telnet session. | `session_id`, `prompt_pattern`, `max_wait_seconds`, `idle_timeout`, `include_raw` |
-| `telnet_send_input` | Telnet | Sends interactive input or raw keystrokes to an active Telnet session. | `session_id`, `input_text`, `raw`, `newline`, `max_wait_seconds`, `prompt_pattern`, `include_raw` |
+| `telnet_send_input` | Telnet | Sends interactive input or raw keystrokes to an active Telnet session. | `session_id`, `input_text`, `raw`, `newline`, `max_wait_seconds`, `prompt_pattern`, `include_raw`, `log_input` |
 | `telnet_close_session` | Telnet | Explicitly closes an active Telnet session and finalizes log files. | `session_id`, `include_raw` |
-| `serial_client` | Serial | Connects or sends command sequences over a local serial port or network serial bridge (`rfc2217://`, `socket://`) with timeout immunity and session logging. | `port`, `commands`, `baudrate`, `bytesize`, `parity`, `stopbits`, `newline`, `serial_session_id`, `max_wait_seconds`, `include_raw` |
+| `serial_client` | Serial | Connects or sends command sequences over a local serial port or network serial bridge (`rfc2217://`, `socket://`) with timeout immunity and session logging. | `port`, `commands`, `baudrate`, `bytesize`, `parity`, `stopbits`, `newline`, `serial_session_id`, `max_wait_seconds`, `include_raw`, `log_input` |
 | `serial_read_session` | Serial | Non-blocking read/polling of the background stream buffer for an active serial session. | `session_id`, `prompt_pattern`, `max_wait_seconds`, `idle_timeout`, `include_raw` |
-| `serial_send_input` | Serial | Sends interactive input, passwords, or raw keystrokes to an active serial session. | `session_id`, `input_text`, `raw`, `newline`, `max_wait_seconds`, `prompt_pattern`, `include_raw` |
+| `serial_send_input` | Serial | Sends interactive input, passwords, or raw keystrokes to an active serial session. | `session_id`, `input_text`, `raw`, `newline`, `max_wait_seconds`, `prompt_pattern`, `include_raw`, `log_input` |
 | `serial_set_speed` | Serial | Dynamically reconfigures baud rate and framing on an active serial session without reconnecting. | `session_id`, `baudrate`, `bytesize`, `parity`, `stopbits` |
 | `serial_send_break` | Serial | Sends an RS-232 hardware Break condition (~250ms) locally or over RFC 2217 to halt a running system into console mode (`>>>`). | `session_id`, `duration`, `prompt_pattern`, `max_wait_seconds`, `include_raw` |
 | `serial_list_ports` | Serial | Enumerates available hardware serial and USB-UART ports on the host system. | *(None)* |
 | `serial_close_session` | Serial | Explicitly closes an active serial session and finalizes log files. | `session_id`, `include_raw` |
 | `list_sessions` | Unified | Lists all active terminal sessions (both Telnet and Serial) with protocol and byte statistics. | *(None)* |
 | `telnet_list_sessions` | Unified | Backward-compatible alias for `list_sessions`. | *(None)* |
+
+**Input log (v0.9.1).** `log_input` (default off) writes `[INPUT]` records, with
+millisecond stamps on the received records' clock, to the session transcript; a send
+after a password prompt is recorded without its text. See [Version 0.9.1](#version-091).
 
 **Result size (v0.9.0).** Results leave out what carries no information. `include_raw`
 (default false, every stream tool) adds the exact bytes as base64; `full_screen`
