@@ -57,11 +57,12 @@ token savings stay, `.log.raw` still holds received bytes only).
   the next received record. Turning it on also stamps received records, as
   `timestamp_chunks` does. A named key is logged by name (`<UP>`, `<CTRL_Z>`), a
   literal key quoted (`"x"`), a `raw` send marked `(raw)`.
-* **A send that follows a password prompt is never logged**: if the most recent received
-  text ends in a line holding `Password:` (any case, so also `Old password:`,
-  `New password:`), or `Verification:`, the record reads
-  `[INPUT] (suppressed: password prompt)`, with a timestamp and no text. The pattern is
-  `PASSWORD_PROMPT_PATTERN` in `tools.py`.
+* **A send that follows a password prompt is never logged**: once `Password:` (any case,
+  so also `Old password:`, `New password:`) or `Verification:` has appeared anywhere in the
+  text received since the previous send (a broadcast after it does not hide it), sends are
+  recorded as `[INPUT] (suppressed: password prompt)`, with a timestamp and no text, until
+  the send that ends the line (CR/LF) that answers it. The pattern is
+  `PASSWORD_PROMPT_PATTERN` in `tools.py`; when unsure it suppresses.
 
 Example (fake host):
 

@@ -18,7 +18,7 @@ import pytest
 from chuk_mcp_telnet_client.logger import INPUT_SUPPRESSED_TEXT
 from chuk_mcp_telnet_client.tools import (
     PASSWORD_PROMPT_PATTERN,
-    _after_password_prompt,
+    _has_password_prompt,
     serial_client_tool,
     serial_close_session,
     serial_send_input,
@@ -88,6 +88,13 @@ class ScriptedHost:
             conn.sendall(b"\r\nOld pass")
             time.sleep(0.15)
             conn.sendall(b"word: ")
+        elif line in ("PWBC", "PWBC2"):  # a prompt, then unsolicited broadcast(s), then silence
+            self.awaiting_password = True
+            conn.sendall(b"\r\nPassword: ")
+            for n in range(1 if line == "PWBC" else 2):
+                time.sleep(0.15)
+                conn.sendall(b"\r\n%BROADCAST 0002" + str(n).encode()
+                             + b" Reply received on AXP1 from user OPER\r\n")
         elif line == "SHOW TIME":
             time.sleep(0.05)
             conn.sendall(b"\r\n   4-SEP-2026 23:30:00\r\n$ ")
@@ -302,9 +309,11 @@ def test_keys_after_a_password_prompt_are_suppressed(host, tmp_path):
     "Username: SYSTEM\r\nPassword: ",
     "\r\nPassword: ***",                  # a prompt followed by echoed characters
     "\x1b[1mPassword:\x1b[0m ",           # with display attributes around it
+    "\r\nPassword: \r\n%BROADCAST 00029 Reply received on AXP1 from user OPER\r\n",  # not the last line
+    "Password: \r\nWelcome\r\n$ ",         # anywhere in the text: errs toward suppressing
 ])
 def test_password_prompts_recognised(received):
-    assert _after_password_prompt(received) is True
+    assert _has_password_prompt(received) is True
     assert PASSWORD_PROMPT_PATTERN.search("Password: ")
 
 
@@ -312,12 +321,11 @@ def test_password_prompts_recognised(received):
     "",
     "\r\n$ ",
     "\r\nLogged in\r\n$ ",
-    "Password: \r\nWelcome\r\n$ ",         # the prompt was answered; the host went on
     "\r\n%LOGIN-I-PASSWORD changed\r\n$ ",  # no colon-ended prompt on the last line
     "\r\nUsername: ",
 ])
 def test_non_password_text_is_not_suppressed(received):
-    assert _after_password_prompt(received) is False
+    assert _has_password_prompt(received) is False
 
 
 # (4) terminal_send_key: named keys are logged by name ---------------------------------------
@@ -400,3 +408,80 @@ def test_serial_input_log_off_by_default(tmp_path):
             vax.stop()
 
     assert "[INPUT]" not in _read(_run(go()))
+
+
+# Review fix (vms-exploration-orch, 15-NOV-2026): a broadcast after the prompt hid it -------
+
+@pytest.mark.parametrize("trigger,broadcasts", [("PWBC", 1), ("PWBC2", 2)])
+def test_broadcast_between_prompt_and_password(host, tmp_path, trigger, broadcasts):
+    async def go():
+        sid = "inlog_pw_bc_" + trigger
+        await telnet_client_tool(
+            host="127.0.0.1", port=host.port, commands=[], telnet_session_id=sid,
+            log_dir=str(tmp_path), log_input=True, max_wait_seconds=3.0)
+        await telnet_send_input(session_id=sid, input_text=trigger, max_wait_seconds=3.0)
+        await asyncio.sleep(0.15 * broadcasts + 0.4)  # the broadcasts arrive after the prompt
+        res = await telnet_send_input(session_id=sid, input_text="notarealpw",
+                                      max_wait_seconds=3.0)
+        await telnet_send_input(session_id=sid, input_text="SHOW TIME", max_wait_seconds=3.0)
+        await telnet_close_session(sid)
+        return os.path.join(str(tmp_path), f"{sid}.log"), res
+
+    log, res = _run(go())
+    assert "BROADCAST" in _read(log)
+    assert "notarealpw" not in _read(log)
+    assert [r[1] for r in _inputs(log)] == [trigger, INPUT_SUPPRESSED_TEXT, "SHOW TIME"]
+
+
+def test_second_login_cycle_after_a_successful_login(host, tmp_path):
+    async def go():
+        sid = "inlog_pw_twice"
+        await telnet_client_tool(
+            host="127.0.0.1", port=host.port, commands=[], telnet_session_id=sid,
+            log_dir=str(tmp_path), log_input=True, max_wait_seconds=3.0)
+        for _ in range(2):
+            await telnet_send_input(session_id=sid, input_text="USER", max_wait_seconds=3.0)
+            await telnet_send_input(session_id=sid, input_text="pw-cycle", max_wait_seconds=3.0)
+            await telnet_send_input(session_id=sid, input_text="SHOW TIME", max_wait_seconds=3.0)
+        await telnet_close_session(sid)
+        return os.path.join(str(tmp_path), f"{sid}.log")
+
+    log = _run(go())
+    assert "pw-cycle" not in _read(log)
+    assert [r[1] for r in _inputs(log)] == ["USER", INPUT_SUPPRESSED_TEXT, "SHOW TIME"] * 2
+
+
+def test_password_typed_key_by_key_across_a_broadcast(host, tmp_path):
+    async def go():
+        sid = "inlog_pw_keys_bc"
+        await telnet_client_tool(
+            host="127.0.0.1", port=host.port, commands=[], telnet_session_id=sid,
+            log_dir=str(tmp_path), log_input=True, max_wait_seconds=3.0)
+        await telnet_send_input(session_id=sid, input_text="PWBC", max_wait_seconds=3.0)
+        await terminal_send_key(session_id=sid, key="p", wait_seconds=0.05)
+        await asyncio.sleep(0.4)  # the broadcast lands between two keys
+        await terminal_send_key(session_id=sid, key="w", wait_seconds=0.05)
+        await terminal_send_key(session_id=sid, key="ENTER", wait_seconds=0.3)
+        await terminal_send_key(session_id=sid, key="TAB", wait_seconds=0.05)
+        await telnet_close_session(sid)
+        return os.path.join(str(tmp_path), f"{sid}.log")
+
+    log = _run(go())
+    assert [r[1] for r in _inputs(log)] == ["PWBC"] + [INPUT_SUPPRESSED_TEXT] * 3 + ["<TAB>"]
+
+
+def test_input_log_switched_on_after_a_prompt_does_not_leak(host, tmp_path):
+    async def go():
+        sid = "inlog_pw_late"
+        await telnet_client_tool(
+            host="127.0.0.1", port=host.port, commands=["USER"], telnet_session_id=sid,
+            log_dir=str(tmp_path), max_wait_seconds=3.0)
+        await telnet_send_input(session_id=sid, input_text="late-pw", max_wait_seconds=3.0,
+                                log_input=True)
+        await telnet_send_input(session_id=sid, input_text="SHOW TIME", max_wait_seconds=3.0)
+        await telnet_close_session(sid)
+        return os.path.join(str(tmp_path), f"{sid}.log")
+
+    log = _run(go())
+    assert "late-pw" not in _read(log)
+    assert [r[1] for r in _inputs(log)] == [INPUT_SUPPRESSED_TEXT, "SHOW TIME"]

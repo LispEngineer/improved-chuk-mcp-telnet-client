@@ -177,6 +177,7 @@ class TelnetSession:
     # password-prompt check), kept under session.lock.
     log_input: bool = False
     rx_tail: str = ""
+    pw_pending: bool = False
 
     def __post_init__(self):
         if self.screen is None:
@@ -236,6 +237,7 @@ class SerialSession:
     # password-prompt check), kept under session.lock.
     log_input: bool = False
     rx_tail: str = ""
+    pw_pending: bool = False
 
     def __post_init__(self):
         if self.screen is None:
@@ -298,11 +300,16 @@ def _write_transport(
 # `.log.raw` sidecar, which holds received bytes only.
 
 # A send is NOT logged (the record says "(suppressed: password prompt)", with its
-# timestamp) when the last non-blank line of the most recently received text contains
-# one of these prompts: "Password:" (any case, which includes the VMS "Old password:" and
-# "New password:" and prompts such as "Password for user:"), or "Verification:". The match
-# is anywhere on that line, so a hidden-echo prompt followed by echoed "*" characters or
-# by the typed text still counts. Where in doubt it suppresses: text is withheld, never leaked.
+# timestamp) while a password prompt is outstanding: one of these prompts - "Password:"
+# (any case, which includes the VMS "Old password:" and "New password:" and prompts such
+# as "Password for user:"), or "Verification:" - has appeared ANYWHERE in the text received
+# since the previous send (or the start of the session), whatever came after it (an OPCOM
+# or REPLY broadcast, a MUD event, echoed "*" characters). The prompt is outstanding
+# (session.pw_pending) until a suppressed send that ends a line (its bytes hold CR or LF)
+# answers it, so a password typed key by key is withheld to its ENTER; the next send is
+# logged again unless the host showed a new prompt. A prompt split across two chunks is
+# found through the kept tail of received text. Where in doubt it suppresses: text is
+# withheld, never leaked.
 PASSWORD_PROMPT_PATTERN = re.compile(
     r"(?i)\b(?:password|verification)\b[^:\r\n]{0,40}:"
 )
@@ -311,13 +318,9 @@ RX_TAIL_CHARS = 512
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[()][0-9A-Za-z]|\x1b[@-Z\\-_]")
 
 
-def _after_password_prompt(rx_tail: str) -> bool:
-    """True if the last non-blank line of the received text holds a password prompt."""
-    text = _ANSI_ESCAPE.sub("", rx_tail)
-    for line in reversed(re.split(r"[\r\n]+", text)):
-        if line.strip():
-            return PASSWORD_PROMPT_PATTERN.search(line) is not None
-    return False
+def _has_password_prompt(text: str) -> bool:
+    """True if a password prompt appears anywhere in the (received) text."""
+    return PASSWORD_PROMPT_PATTERN.search(_ANSI_ESCAPE.sub("", text)) is not None
 
 
 def _printable(text: str) -> str:
@@ -349,19 +352,26 @@ def _set_log_input(session: Union["TelnetSession", "SerialSession"], log_input: 
             session.logger.enable_timestamps(session.session_id)
 
 
-def _record_input(session: Union["TelnetSession", "SerialSession"], text: str) -> None:
+def _record_input(
+    session: Union["TelnetSession", "SerialSession"], text: str, payload: bytes = b"",
+) -> None:
     """Write the [INPUT] record for a send about to be made, if the session logs input.
 
     Called just before the transport write, so the stamp is the send time. `text` is
-    already printable (see _printable); it is not written after a password prompt.
+    already printable (see _printable); it is not written while a password prompt is
+    outstanding. The prompt state is kept whether or not input is logged, so switching
+    the log on mid-session cannot leak a password.
     """
-    if not session.log_input or not session.logger:
-        return
     try:
         with session.lock:
-            suppressed = _after_password_prompt(session.rx_tail)
-            session.logger.log_input_record(
-                session.session_id, text, at=time.time(), suppressed=suppressed)
+            suppressed = session.pw_pending
+            if suppressed and (b"\r" in payload or b"\n" in payload):
+                # The line that answers the prompt ends here.
+                session.pw_pending = False
+                session.rx_tail = ""
+            if session.log_input and session.logger:
+                session.logger.log_input_record(
+                    session.session_id, text, at=time.time(), suppressed=suppressed)
     except Exception as e:
         logger.warning(f"Failed to log input for session {session.session_id}: {type(e).__name__}")
 
@@ -394,6 +404,8 @@ def _ingest_chunk(
         if session.logger:
             session.logger.log_stream_chunk(session.session_id, text, at=arrived_at, raw=data)
         session.rx_tail = (session.rx_tail + text)[-RX_TAIL_CHARS:]
+        if _has_password_prompt(session.rx_tail):
+            session.pw_pending = True
         session.pending_output.extend(data)
         session.total_bytes_received += len(data)
         session.last_activity = time.time()
@@ -1047,6 +1059,7 @@ async def telnet_client_tool(
             session_id=actual_session_id,
             logger=session_logger,
             log_input=bool(log_input),
+            pw_pending=_has_password_prompt(initial_banner),
         )
         if session_logger:
             session_logger.log_session_start(
@@ -1085,7 +1098,7 @@ async def telnet_client_tool(
             cmd_start_index = len(session.pending_output)
 
         cmd_bytes = (cmd + newline).encode("utf-8")
-        _record_input(session, _printable(cmd))
+        _record_input(session, _printable(cmd), cmd_bytes)
         try:
             await asyncio.to_thread(_write_transport, session, cmd_bytes)
         except Exception as e:
@@ -1211,7 +1224,7 @@ async def telnet_send_input(
 
     payload = input_text.encode("utf-8") if raw else (input_text + newline).encode("utf-8")
     _set_log_input(session, log_input)
-    _record_input(session, _printable(input_text) if not raw else "(raw) " + _printable(input_text))
+    _record_input(session, _printable(input_text) if not raw else "(raw) " + _printable(input_text), payload)
     await asyncio.to_thread(_write_transport, session, payload)
 
 
@@ -1321,6 +1334,7 @@ async def serial_client_tool(
             session_id=actual_session_id,
             logger=session_logger,
             log_input=bool(log_input),
+            pw_pending=_has_password_prompt(initial_banner),
         )
         if session_logger:
             sb = int(stopbits) if stopbits == int(stopbits) else stopbits
@@ -1360,7 +1374,7 @@ async def serial_client_tool(
             cmd_start_index = len(session.pending_output)
 
         cmd_bytes = (cmd + newline).encode("utf-8")
-        _record_input(session, _printable(cmd))
+        _record_input(session, _printable(cmd), cmd_bytes)
         try:
             await asyncio.to_thread(_write_transport, session, cmd_bytes, True)
         except Exception as e:
@@ -1486,7 +1500,7 @@ async def serial_send_input(
 
     payload = input_text.encode("utf-8") if raw else (input_text + newline).encode("utf-8")
     _set_log_input(session, log_input)
-    _record_input(session, _printable(input_text) if not raw else "(raw) " + _printable(input_text))
+    _record_input(session, _printable(input_text) if not raw else "(raw) " + _printable(input_text), payload)
     await asyncio.to_thread(_write_transport, session, payload, True)
 
 
@@ -2004,7 +2018,7 @@ async def terminal_send_key(
 
     if isinstance(session, (TelnetSession, SerialSession)):
         _set_log_input(session, log_input)
-        _record_input(session, f"<{key_upper}>" if key_upper in KEY_SEQUENCES else f'"{_printable(key_normalized)}"')
+        _record_input(session, f"<{key_upper}>" if key_upper in KEY_SEQUENCES else f'"{_printable(key_normalized)}"', payload)
         await asyncio.to_thread(_write_transport, session, payload)
     else:
         raise ValueError(f"Unsupported session type for session '{session_id}'")

@@ -28,15 +28,20 @@ holds received bytes only.
 * **Turning the input log on also stamps the session's received-output records** (as
   `timestamp_chunks: true` does): an unstamped stream has no clock to compare an
   `[INPUT]` stamp with. Opening a session with `log_input: true` stamps from the banner on.
-* **Never logs a send that follows a password prompt.** If the last non-blank line of the
-  most recently received text contains `Password:` (any case; this includes the VMS
-  `Old password:` and `New password:`, and `Password for user:`) or `Verification:`, the
-  record is `[INPUT] (suppressed: password prompt)`, with its timestamp and without the
-  text. The pattern is the documented constant `PASSWORD_PROMPT_PATTERN` in `tools.py`;
-  the check looks at the last line of up to 512 received characters, so a prompt that
-  arrives in a chunk with other text, or split across chunks, is found, and a hidden-echo
-  prompt followed by echoed `*` is still a password prompt. The next send after the
-  host has gone on (for example to `$ `) is logged again. When unsure it suppresses.
+* **Never logs a send that follows a password prompt.** While a password prompt is
+  outstanding the record is `[INPUT] (suppressed: password prompt)`, with its timestamp
+  and without the text. A prompt is `Password:` (any case; this includes the VMS
+  `Old password:` and `New password:`, and `Password for user:`) or `Verification:`,
+  and it is outstanding once it has appeared **anywhere** in the text received since the
+  previous send (or the start of the session) - so an OPCOM or REPLY broadcast, a MUD
+  event or echoed `*` characters arriving after the prompt do not hide it. It stays
+  outstanding until a suppressed send that ends a line (its bytes hold CR or LF) answers it,
+  so a password typed key by key is withheld through its ENTER; the next send is logged
+  again unless the host showed a new prompt. A prompt split across chunks is found through
+  the last 512 received characters. The pattern is the documented constant
+  `PASSWORD_PROMPT_PATTERN` in `tools.py`. The state is kept whether or not input is
+  logged, so switching `log_input` on mid-session cannot leak a password. When unsure it
+  suppresses (a prompt-like word in ordinary output suppresses the next send once).
 * `.log.raw` is unchanged: input never goes into it.
 * The transcript header says `v0.9.1`; `server_version` is `0.9.1`.
 
@@ -50,7 +55,15 @@ holds received bytes only.
 
 ### Changes accepted from the launching session
 
-* None so far.
+* 15-NOV-2026 22:05 (vms-exploration-orch, review of 245fe5d..aac1bfb): the first version
+  looked only at the last line of received text, and a broadcast after `Password:` hid the
+  prompt, so the password was logged (found by its battery, T3). Changed to the
+  "prompt anywhere since the previous send" rule above, with tests for a broadcast, two
+  broadcasts in separate chunks, a second login cycle, key-by-key typing across a
+  broadcast, and switching the log on after a prompt. The same review asked whether
+  anything else writes typed text to the log: only `SessionLogger.log_input_record` does
+  (`log_command` and `log_input` remain no-ops; the `command`/`input_sent` fields are in
+  tool results, not the transcript).
 
 ## 0.9.0
 
