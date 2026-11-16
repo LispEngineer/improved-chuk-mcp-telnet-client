@@ -12,6 +12,9 @@ from typing import Dict, Optional
 
 logger = logging.getLogger(__name__)
 
+# The text of the record written in place of a send that follows a password prompt.
+INPUT_SUPPRESSED_TEXT = "(suppressed: password prompt)"
+
 
 class SessionLogger:
     """Manages persistent disk logging for Telnet and Serial sessions."""
@@ -86,7 +89,7 @@ class SessionLogger:
         header = (
             f"{'='*80}\n"
             f"{protocol.upper()} SESSION LOG: {target}\n"
-            f"Server Version : chuk-mcp-terminal-client v0.9.0\n"
+            f"Server Version : chuk-mcp-terminal-client v0.9.1\n"
             f"Session ID     : {session_id}\n"
             f"Started At     : {now_str}\n"
             f"{'='*80}\n\n"
@@ -162,8 +165,54 @@ class SessionLogger:
         host: Optional[str] = None,
         port: Optional[int] = None,
     ) -> Optional[str]:
-        """Never persist input, which may be a password or secret command."""
+        """Never persist input, which may be a password or secret command.
+
+        (Kept as a no-op. The opt-in input log of v0.9.1 is log_input_record, which
+        the tools call only for a session opened or switched with log_input=True.)
+        """
         return self.get_session_log_path(session_id)
+
+    def enable_timestamps(self, session_id: str) -> None:
+        """Stamp the session's received-output records (as timestamp_chunks=True does)."""
+        self._timestamp_mode[session_id] = True
+
+    def log_input_record(
+        self,
+        session_id: str,
+        text: str,
+        at: Optional[float] = None,
+        suppressed: bool = False,
+    ) -> Optional[str]:
+        """Write one `[INPUT]` record: what a tool call sent, stamped to the millisecond.
+
+        `at` is a time.time() value, the same clock that stamps received-output
+        records (log_stream_chunk's `at`), so the gap from an [INPUT] record to the
+        next received record is the host's reply time. With suppressed=True the text
+        is not written, only a note that it was withheld (a send after a password
+        prompt). Nothing is written to the `.log.raw` sidecar, which holds received
+        bytes only.
+        """
+        log_path = self.get_session_log_path(session_id)
+        if not log_path:
+            return None
+
+        when = datetime.fromtimestamp(at) if at is not None else datetime.now()
+        stamp = when.astimezone().isoformat(timespec="milliseconds")
+        body = INPUT_SUPPRESSED_TEXT if suppressed else text
+        entry = f"[{stamp}] [INPUT] {body}\n"
+        try:
+            with self._write_lock, open(log_path, "a+b") as f:
+                # An unterminated stream chunk must not run into the record.
+                f.seek(0, os.SEEK_END)
+                if f.tell() > 0:
+                    f.seek(-1, os.SEEK_END)
+                    if f.read(1) != b"\n":
+                        entry = "\n" + entry
+                f.write(entry.encode("utf-8", errors="replace"))
+            return log_path
+        except Exception as e:
+            logger.warning(f"Failed writing input record to log '{log_path}': {e}")
+            return None
 
     def log_config_change(
         self,

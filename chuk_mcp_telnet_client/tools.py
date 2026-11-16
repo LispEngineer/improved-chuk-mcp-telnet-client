@@ -172,6 +172,11 @@ class TelnetSession:
     screen_seq: int = 0
     last_rx_monotonic: float = field(default_factory=time.monotonic)
     last_read_sig: Optional[tuple] = None
+    # Opt-in input log (v0.9.1): when log_input is True, each send is written to the
+    # transcript as an [INPUT] record. rx_tail is the last received text (for the
+    # password-prompt check), kept under session.lock.
+    log_input: bool = False
+    rx_tail: str = ""
 
     def __post_init__(self):
         if self.screen is None:
@@ -226,6 +231,11 @@ class SerialSession:
     screen_seq: int = 0
     last_rx_monotonic: float = field(default_factory=time.monotonic)
     last_read_sig: Optional[tuple] = None
+    # Opt-in input log (v0.9.1): when log_input is True, each send is written to the
+    # transcript as an [INPUT] record. rx_tail is the last received text (for the
+    # password-prompt check), kept under session.lock.
+    log_input: bool = False
+    rx_tail: str = ""
 
     def __post_init__(self):
         if self.screen is None:
@@ -274,6 +284,88 @@ def _write_transport(
                 session.serial.flush()
 
 
+# ----------------------------------------------------------------------------
+# Opt-in input log (v0.9.1)
+# ----------------------------------------------------------------------------
+#
+# Off unless a session is opened (or later called) with log_input=True. Then each send
+# made by telnet_client / serial_client commands, telnet_send_input / serial_send_input
+# and terminal_send_key writes an [INPUT] record to the session's transcript, stamped
+# from time.time() - the clock that stamps received-output records (log_stream_chunk's
+# `at`) - so a reply time is the gap to the next received record. Turning it on also
+# stamps the session's received-output records (as timestamp_chunks=True does), because
+# an unstamped stream has no clock to compare against. Input is never written to the
+# `.log.raw` sidecar, which holds received bytes only.
+
+# A send is NOT logged (the record says "(suppressed: password prompt)", with its
+# timestamp) when the last non-blank line of the most recently received text contains
+# one of these prompts: "Password:" (any case, which includes the VMS "Old password:" and
+# "New password:" and prompts such as "Password for user:"), or "Verification:". The match
+# is anywhere on that line, so a hidden-echo prompt followed by echoed "*" characters or
+# by the typed text still counts. Where in doubt it suppresses: text is withheld, never leaked.
+PASSWORD_PROMPT_PATTERN = re.compile(
+    r"(?i)\b(?:password|verification)\b[^:\r\n]{0,40}:"
+)
+# How much received text is kept to check for a password prompt.
+RX_TAIL_CHARS = 512
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[()][0-9A-Za-z]|\x1b[@-Z\\-_]")
+
+
+def _after_password_prompt(rx_tail: str) -> bool:
+    """True if the last non-blank line of the received text holds a password prompt."""
+    text = _ANSI_ESCAPE.sub("", rx_tail)
+    for line in reversed(re.split(r"[\r\n]+", text)):
+        if line.strip():
+            return PASSWORD_PROMPT_PATTERN.search(line) is not None
+    return False
+
+
+def _printable(text: str) -> str:
+    """The text on one line: control characters shown as \\r, \\n, \\t or \\xNN."""
+    out = []
+    for ch in text:
+        if ch == "\\":
+            out.append("\\\\")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\t":
+            out.append("\\t")
+        elif ord(ch) < 0x20 or ord(ch) == 0x7F:
+            out.append(f"\\x{ord(ch):02x}")
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def _set_log_input(session: Union["TelnetSession", "SerialSession"], log_input: Optional[bool]) -> None:
+    """Apply a log_input argument: None leaves the session's setting alone."""
+    if log_input is None:
+        return
+    with session.lock:
+        session.log_input = bool(log_input)
+        if session.log_input and session.logger:
+            session.logger.enable_timestamps(session.session_id)
+
+
+def _record_input(session: Union["TelnetSession", "SerialSession"], text: str) -> None:
+    """Write the [INPUT] record for a send about to be made, if the session logs input.
+
+    Called just before the transport write, so the stamp is the send time. `text` is
+    already printable (see _printable); it is not written after a password prompt.
+    """
+    if not session.log_input or not session.logger:
+        return
+    try:
+        with session.lock:
+            suppressed = _after_password_prompt(session.rx_tail)
+            session.logger.log_input_record(
+                session.session_id, text, at=time.time(), suppressed=suppressed)
+    except Exception as e:
+        logger.warning(f"Failed to log input for session {session.session_id}: {type(e).__name__}")
+
+
 def _answer_vt_queries(session: Union["TelnetSession", "SerialSession"], data: bytes) -> None:
     """Automatic DEC VT terminal query handling: answer DA, CPR and DSR."""
     replies = []
@@ -301,6 +393,7 @@ def _ingest_chunk(
         # Publish to stream consumers only after the transcript append completes.
         if session.logger:
             session.logger.log_stream_chunk(session.session_id, text, at=arrived_at, raw=data)
+        session.rx_tail = (session.rx_tail + text)[-RX_TAIL_CHARS:]
         session.pending_output.extend(data)
         session.total_bytes_received += len(data)
         session.last_activity = time.time()
@@ -925,11 +1018,17 @@ async def telnet_client_tool(
     enable_logging: bool = True,
     timestamp_chunks: bool = False,
     include_raw: bool = False,
+    log_input: Optional[bool] = None,
 ) -> TelnetClientOutput:
     """Execute commands on a remote system via Telnet with timeout immunity and session logging.
 
     By default the result carries the decoded text only; include_raw=True adds the
     exact bytes as base64 (raw_base64 and the other *_raw_base64 fields).
+
+    log_input=True (opt-in, off by default; None leaves a session's setting alone) writes an
+    [INPUT] record to the session transcript for each command sent, stamped on the same clock
+    as the received-output records (which it also stamps); a send that follows a password
+    prompt is recorded as "(suppressed: password prompt)", without its text.
     """
     actual_session_id = telnet_session_id or f"telnet_{int(time.time())}_{uuid.uuid4().hex[:6]}"
     session = await _session_store.get(actual_session_id)
@@ -947,6 +1046,7 @@ async def telnet_client_tool(
             created_at=time.time(),
             session_id=actual_session_id,
             logger=session_logger,
+            log_input=bool(log_input),
         )
         if session_logger:
             session_logger.log_session_start(
@@ -954,7 +1054,7 @@ async def telnet_client_tool(
                 target=f"{host}:{port}",
                 protocol="TELNET",
                 banner=initial_banner,
-                timestamp_chunks=timestamp_chunks,
+                timestamp_chunks=timestamp_chunks or bool(log_input),
             )
         await _session_store.store(session)
 
@@ -974,6 +1074,7 @@ async def telnet_client_tool(
                 session.logger = session_logger
         elif session.logger and timestamp_chunks:
             session.logger._timestamp_mode[actual_session_id] = True
+    _set_log_input(session, log_input)
 
     responses: list[CommandResponse] = []
     all_completed = True
@@ -984,6 +1085,7 @@ async def telnet_client_tool(
             cmd_start_index = len(session.pending_output)
 
         cmd_bytes = (cmd + newline).encode("utf-8")
+        _record_input(session, _printable(cmd))
         try:
             await asyncio.to_thread(_write_transport, session, cmd_bytes)
         except Exception as e:
@@ -1090,11 +1192,15 @@ async def telnet_send_input(
     max_wait_seconds: float = 5.0,
     prompt_pattern: Optional[str] = None,
     include_raw: bool = False,
+    log_input: Optional[bool] = None,
 ) -> TelnetSendInputOutput:
     """Send interactive input or keystrokes to an active Telnet session.
 
     By default the result carries the decoded text only; include_raw=True adds the
     exact bytes as base64 (raw_base64 and the other *_raw_base64 fields).
+
+    log_input=True switches the session's opt-in input log on (False off, None leaves it):
+    an [INPUT] record per send in the transcript, never the text after a password prompt.
     """
     session = await _session_store.get(session_id)
     if session is None or not isinstance(session, TelnetSession):
@@ -1104,6 +1210,8 @@ async def telnet_send_input(
         start_index = len(session.pending_output)
 
     payload = input_text.encode("utf-8") if raw else (input_text + newline).encode("utf-8")
+    _set_log_input(session, log_input)
+    _record_input(session, _printable(input_text) if not raw else "(raw) " + _printable(input_text))
     await asyncio.to_thread(_write_transport, session, payload)
 
 
@@ -1172,11 +1280,17 @@ async def serial_client_tool(
     enable_logging: bool = True,
     timestamp_chunks: bool = False,
     include_raw: bool = False,
+    log_input: Optional[bool] = None,
 ) -> SerialClientOutput:
     """Execute commands on a hardware serial/console port with timeout immunity and session logging.
 
     By default the result carries the decoded text only; include_raw=True adds the
     exact bytes as base64 (raw_base64 and the other *_raw_base64 fields).
+
+    log_input=True (opt-in, off by default; None leaves a session's setting alone) writes an
+    [INPUT] record to the session transcript for each command sent, stamped on the same clock
+    as the received-output records (which it also stamps); a send that follows a password
+    prompt is recorded as "(suppressed: password prompt)", without its text.
     """
     actual_session_id = serial_session_id or f"serial_{int(time.time())}_{uuid.uuid4().hex[:6]}"
     session = await _session_store.get(actual_session_id)
@@ -1206,6 +1320,7 @@ async def serial_client_tool(
             created_at=time.time(),
             session_id=actual_session_id,
             logger=session_logger,
+            log_input=bool(log_input),
         )
         if session_logger:
             sb = int(stopbits) if stopbits == int(stopbits) else stopbits
@@ -1215,7 +1330,7 @@ async def serial_client_tool(
                 target=target_str,
                 protocol="SERIAL",
                 banner=initial_banner,
-                timestamp_chunks=timestamp_chunks,
+                timestamp_chunks=timestamp_chunks or bool(log_input),
             )
         await _session_store.store(session)
         session.transaction_bytes = bytearray()
@@ -1234,6 +1349,7 @@ async def serial_client_tool(
                 session.logger = session_logger
         elif session.logger and timestamp_chunks:
             session.logger._timestamp_mode[actual_session_id] = True
+    _set_log_input(session, log_input)
 
     responses: list[CommandResponse] = []
     all_completed = True
@@ -1244,6 +1360,7 @@ async def serial_client_tool(
             cmd_start_index = len(session.pending_output)
 
         cmd_bytes = (cmd + newline).encode("utf-8")
+        _record_input(session, _printable(cmd))
         try:
             await asyncio.to_thread(_write_transport, session, cmd_bytes, True)
         except Exception as e:
@@ -1350,11 +1467,15 @@ async def serial_send_input(
     max_wait_seconds: float = 5.0,
     prompt_pattern: Optional[str] = None,
     include_raw: bool = False,
+    log_input: Optional[bool] = None,
 ) -> SerialSendInputOutput:
     """Send interactive input, passwords, or raw keystrokes to an active Serial session.
 
     By default the result carries the decoded text only; include_raw=True adds the
     exact bytes as base64 (raw_base64 and the other *_raw_base64 fields).
+
+    log_input=True switches the session's opt-in input log on (False off, None leaves it):
+    an [INPUT] record per send in the transcript, never the text after a password prompt.
     """
     session = await _session_store.get(session_id)
     if session is None or not isinstance(session, SerialSession):
@@ -1364,6 +1485,8 @@ async def serial_send_input(
         start_index = len(session.pending_output)
 
     payload = input_text.encode("utf-8") if raw else (input_text + newline).encode("utf-8")
+    _set_log_input(session, log_input)
+    _record_input(session, _printable(input_text) if not raw else "(raw) " + _printable(input_text))
     await asyncio.to_thread(_write_transport, session, payload, True)
 
 
@@ -1855,8 +1978,13 @@ async def terminal_send_key(
     wait_seconds: float = 0.5,
     full_screen: bool = False,
     include_raw: bool = False,
+    log_input: Optional[bool] = None,
 ) -> TerminalSendKeyOutput:
-    """Send a keyboard key or VT escape sequence (e.g. UP, DOWN, TAB, ENTER, ESC, CTRL_Z) to a terminal session."""
+    """Send a keyboard key or VT escape sequence (e.g. UP, DOWN, TAB, ENTER, ESC, CTRL_Z) to a terminal session.
+
+    log_input=True switches the session's opt-in input log on (False off, None leaves it):
+    an [INPUT] record per key (a named key as <UP>), never after a password prompt.
+    """
     session = await _session_store.get(session_id)
     if session is None:
         raise ValueError(f"No active session found with ID '{session_id}'")
@@ -1875,6 +2003,8 @@ async def terminal_send_key(
         payload = key_normalized.encode("utf-8")
 
     if isinstance(session, (TelnetSession, SerialSession)):
+        _set_log_input(session, log_input)
+        _record_input(session, f"<{key_upper}>" if key_upper in KEY_SEQUENCES else f'"{_printable(key_normalized)}"')
         await asyncio.to_thread(_write_transport, session, payload)
     else:
         raise ValueError(f"Unsupported session type for session '{session_id}'")
