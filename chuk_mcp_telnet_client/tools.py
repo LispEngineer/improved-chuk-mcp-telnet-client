@@ -93,6 +93,16 @@ class TerminalDefaults:
     # a client for ever, and how often it looks at the (always current) session state.
     WAIT_FOR_CHANGE_MAX_TIMEOUT: float = 300.0
     WAIT_FOR_CHANGE_POLL_SECONDS: float = 0.02
+    # v0.9.2: waits sleep on an event the reader sets when bytes arrive, so an idle wait
+    # costs no CPU. A wait still wakes at least this often as a safety net (it then does
+    # nothing unless something changed).
+    WAIT_HEARTBEAT_SECONDS: float = 1.0
+    # v0.9.2: a prompt search resumes from where the last one ended, backed up by this many
+    # characters, so it does not rescan all pending output each time more arrives. A prompt
+    # pattern whose match is longer than this (or that must see further back than this to
+    # match, as an unbounded ".*" before the prompt would) can be missed; real prompts are
+    # a few dozen characters.
+    PROMPT_LOOKBACK_CHARS: int = 4096
     # Matches, in order:
     #   1. (?m:^\$ )            - a bare "$ " DCL prompt at the start of any line
     #                             (stock, uncustomized OpenVMS SYLOGIN.COM).
@@ -138,6 +148,37 @@ class TerminalDefaults:
 # ============================================================================
 
 
+class _Wakeups:
+    """Lets a waiting coroutine sleep until the reader thread has something to report.
+
+    A waiter registers an asyncio.Event with its loop; notify() (called from the reader
+    thread, or any thread) sets every registered event on its own loop.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._waiters: list = []
+
+    def add(self) -> asyncio.Event:
+        event = asyncio.Event()
+        with self._lock:
+            self._waiters.append((asyncio.get_running_loop(), event))
+        return event
+
+    def remove(self, event: asyncio.Event) -> None:
+        with self._lock:
+            self._waiters = [w for w in self._waiters if w[1] is not event]
+
+    def notify(self) -> None:
+        with self._lock:
+            waiters = list(self._waiters)
+        for loop, event in waiters:
+            try:
+                loop.call_soon_threadsafe(event.set)
+            except RuntimeError:
+                pass  # that loop is closed
+
+
 @dataclass
 class TelnetSession:
     """Active telnet session with background stream buffering."""
@@ -177,6 +218,7 @@ class TelnetSession:
     # password-prompt check), kept under session.lock.
     log_input: bool = False
     rx_tail: str = ""
+    wakeups: _Wakeups = field(default_factory=_Wakeups)
     pw_pending: bool = False
 
     def __post_init__(self):
@@ -237,6 +279,7 @@ class SerialSession:
     # password-prompt check), kept under session.lock.
     log_input: bool = False
     rx_tail: str = ""
+    wakeups: _Wakeups = field(default_factory=_Wakeups)
     pw_pending: bool = False
 
     def __post_init__(self):
@@ -416,6 +459,7 @@ def _ingest_chunk(
                 session.stream.feed(text)
             except Exception as e:
                 logger.warning(f"Error feeding {session.session_type} text to pyte stream: {e}")
+    session.wakeups.notify()
 
 
 def _finish_reader(session):
@@ -426,6 +470,7 @@ def _finish_reader(session):
         session.is_active = False
         if text and session.logger:
             session.logger.log_stream_chunk(session.session_id, text)
+    session.wakeups.notify()
 
 
 def _read_telnet_payload(tn):
@@ -968,6 +1013,27 @@ def _prompt_text_offset(text: str, byte_offset: int) -> int:
     return len(text)
 
 
+def _utf8_incomplete_tail(data: bytes) -> bool:
+    """True if data ends partway through a multi-byte UTF-8 character."""
+    for i in range(1, min(4, len(data)) + 1):
+        byte = data[-i]
+        if byte < 0x80:
+            return False
+        if byte >= 0xC0:
+            need = 2 if byte < 0xE0 else 3 if byte < 0xF0 else 4
+            return i < need
+    return False
+
+
+async def _sleep_until(session, event: asyncio.Event, timeout: float) -> None:
+    """Wait for the reader's wake-up, at most `timeout` seconds (and the heartbeat)."""
+    timeout = min(max(timeout, 0.0), TerminalDefaults.WAIT_HEARTBEAT_SECONDS)
+    try:
+        await asyncio.wait_for(event.wait(), timeout)
+    except asyncio.TimeoutError:
+        pass
+
+
 async def _wait_for_output(
     session: Union[TelnetSession, SerialSession],
     start_index: int = 0,
@@ -980,32 +1046,66 @@ async def _wait_for_output(
     start_index limits prompt matching to newly received output; delivery still
     starts at the oldest pending byte, including bytes before that index.
     Caller serializes consumers; all queue decisions/dequeues share the reader lock.
+
+    v0.9.2: the wait sleeps on an event the reader sets when bytes arrive (or the session
+    ends); nothing is decoded or searched unless the pending output changed since the last
+    look; and a search resumes PROMPT_LOOKBACK_CHARS before where the last one ended
+    (never before start_index) instead of rescanning everything pending. What matches,
+    what is delivered, idle_timeout and the deadline are as before.
     """
     compiled = re.compile(prompt_pattern) if prompt_pattern else None
     deadline = time.monotonic() + max(0.0, max_wait_seconds)
-    while True:
-        with session.lock:
-            pending = bytes(session.pending_output)
-            # surrogateescape makes character offsets reversible to payload offsets;
-            # these private surrogate characters are never exposed through JSON.
-            current = pending.decode("utf-8", errors="surrogateescape")
-            offset = _prompt_text_offset(current, start_index) if compiled else 0
-            match = compiled.search(current, offset) if compiled else None
-            if match:
-                length = len(current[:match.end()].encode("utf-8", errors="surrogateescape"))
-                # Only byte-offset arithmetic uses surrogateescape. Prompt metadata
-                # must be valid Unicode before the MCP serializer sees the result.
-                matched_prompt = match.group(0).encode("utf-8", errors="surrogateescape").decode(
-                    "utf-8", errors="replace"
-                )
-                return _take_pending(session, length), True, matched_prompt
-            if not session.is_active:
-                return _take_pending(session, final=True), True, None
-            if idle_timeout is not None and pending and time.monotonic() - session.last_rx_monotonic >= idle_timeout:
-                return _take_pending(session), True, None
-            if time.monotonic() >= deadline:
-                return _take_pending(session), False, None
-        await asyncio.sleep(min(0.02, max(0.0, deadline - time.monotonic())))
+    event = session.wakeups.add()
+    seen = None            # (bytes received, pending length) at the last decode and search
+    current = ""
+    offset = 0
+    searched_to = 0        # characters of `current` already searched
+    offset_stable = False
+    try:
+        while True:
+            event.clear()  # before looking, so a byte arriving after the look sets it again
+            with session.lock:
+                pending_len = len(session.pending_output)
+                state = (session.total_bytes_received, pending_len)
+                if state != seen:
+                    seen = state
+                    pending = bytes(session.pending_output)
+                    # surrogateescape makes character offsets reversible to payload offsets;
+                    # these private surrogate characters are never exposed through JSON.
+                    current = pending.decode("utf-8", errors="surrogateescape")
+                    if compiled:
+                        if not offset_stable:
+                            offset = _prompt_text_offset(current, start_index)
+                            # The boundary cannot move once the bytes before start_index
+                            # end on a whole character.
+                            offset_stable = not _utf8_incomplete_tail(pending[:start_index])
+                        begin = max(offset, searched_to - TerminalDefaults.PROMPT_LOOKBACK_CHARS)
+                        match = compiled.search(current, begin)
+                        searched_to = len(current)
+                    else:
+                        match = None
+                    if match:
+                        length = len(current[:match.end()].encode("utf-8", errors="surrogateescape"))
+                        # Only byte-offset arithmetic uses surrogateescape. Prompt metadata
+                        # must be valid Unicode before the MCP serializer sees the result.
+                        matched_prompt = match.group(0).encode("utf-8", errors="surrogateescape").decode(
+                            "utf-8", errors="replace"
+                        )
+                        return _take_pending(session, length), True, matched_prompt
+                if not session.is_active:
+                    return _take_pending(session, final=True), True, None
+                now = time.monotonic()
+                wake_in = deadline - now
+                if idle_timeout is not None and pending_len:
+                    idle_for = now - session.last_rx_monotonic
+                    if idle_for >= idle_timeout:
+                        return _take_pending(session), True, None
+                    wake_in = min(wake_in, idle_timeout - idle_for)
+                if now >= deadline:
+                    return _take_pending(session), False, None
+            await _sleep_until(session, event, wake_in)
+    finally:
+        session.wakeups.remove(event)
 
 
 # ============================================================================
@@ -2088,28 +2188,37 @@ async def terminal_wait_for_change(
     changed = False
     matched: Optional[str] = None
     timed_out = False
-    while True:
-        now = time.monotonic()
-        with session.lock:
-            if session.screen_seq != seen_seq or out is None:
-                # Render only when the reader has fed pyte since the last look.
-                seen_seq = session.screen_seq
-                out = _extract_screen_output(session)
-                changed = _screen_sig(out) != baseline
-                if compiled is not None:
-                    m = compiled.search(out.screen_text)
-                    matched = m.group(0) if m else None
-            quiet = now - session.last_rx_monotonic >= settle
-            active = session.is_active
-        done = (matched is not None) if compiled is not None else changed
-        if done and quiet:
-            break
-        if not active:
-            break
-        if now >= deadline:
-            timed_out = True
-            break
-        await asyncio.sleep(min(TerminalDefaults.WAIT_FOR_CHANGE_POLL_SECONDS, max(0.0, deadline - now)))
+    event = session.wakeups.add()
+    try:
+        while True:
+            event.clear()  # before looking, so bytes arriving after the look set it again
+            now = time.monotonic()
+            with session.lock:
+                if session.screen_seq != seen_seq or out is None:
+                    # Render only when the reader has fed pyte since the last look.
+                    seen_seq = session.screen_seq
+                    out = _extract_screen_output(session)
+                    changed = _screen_sig(out) != baseline
+                    if compiled is not None:
+                        m = compiled.search(out.screen_text)
+                        matched = m.group(0) if m else None
+                quiet_for = now - session.last_rx_monotonic
+                quiet = quiet_for >= settle
+                active = session.is_active
+            done = (matched is not None) if compiled is not None else changed
+            if done and quiet:
+                break
+            if not active:
+                break
+            if now >= deadline:
+                timed_out = True
+                break
+            wake_in = deadline - now
+            if done:
+                wake_in = min(wake_in, settle - quiet_for)  # until the screen has been quiet long enough
+            await _sleep_until(session, event, wake_in)
+    finally:
+        session.wakeups.remove(event)
 
     with session.lock:
         session.last_read_sig = _screen_sig(out)

@@ -42,6 +42,15 @@ A unified **Model Context Protocol (MCP)** Terminal Communications Server design
 
 ## Release History & Changes
 
+### Version 0.9.2
+
+**Idle-CPU fix, no API change.** A wait on a quiet session no longer polls: it sleeps until
+the reader thread reports bytes, and the prompt search resumes near the end of the last
+search instead of rescanning everything pending (0.9.1 used about 20% of a core while
+waiting with 300 KB pending; 0.9.2 uses under 0.1%). The one limit: a prompt match longer
+than `TerminalDefaults.PROMPT_LOOKBACK_CHARS` (4096 characters) can be missed when later
+data completes it. See the CHANGELOG for measurements.
+
 ### Version 0.9.1
 
 **Opt-in input log (`log_input`).** Off by default; nothing else changes (0.9.0's

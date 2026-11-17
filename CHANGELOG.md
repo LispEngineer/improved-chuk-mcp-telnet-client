@@ -1,5 +1,57 @@
 # Changelog
 
+## 0.9.2
+
+Idle-CPU fix. A client process waiting on a quiet session used about 20% of a core once
+a few hundred KB of output were pending, and the cost grew with the total output, not with
+incoming bytes (found by ixa-claude on AdmiralIXA during a long MMS run that printed
+little). No change to results, defaults or tool arguments.
+
+### Cause
+
+`_wait_for_output` polled every 20 ms, and each poll copied and decoded all pending output
+and re-ran the prompt search from `start_index` over all of it, even when no byte had
+arrived. With a prompt pattern such as `(?:[A-Za-z0-9]+::)?USER1\$ $` that search takes
+15 ms at 50 KB and 50 ms at 300 KB. (`_prompt_text_offset` is also linear in the output.)
+
+### Changes
+
+* `_wait_for_output` sleeps on an `asyncio.Event` that the reader thread sets when bytes
+  arrive or the session ends (deadline and `idle_timeout` are the timeouts; a 1 s heartbeat
+  is a safety net and does nothing unless something changed). A prompt that arrives after
+  5 s of silence is returned within 50 ms.
+* Nothing is decoded or searched unless bytes arrived since the last look.
+* The search is incremental: it resumes `TerminalDefaults.PROMPT_LOOKBACK_CHARS` (4096)
+  characters before where the last one ended, never before `start_index`, using the
+  full text so `^`/`$` keep their meaning. **Documented limit:** a prompt match longer than
+  that, or that needs to see further back than that, can be missed when it is completed by
+  later data (real prompts are tens of characters). Which prompt matches, delivery of the
+  oldest pending prefix, surrogateescape offsets, `idle_timeout` and the deadline are
+  unchanged; a randomized test compares it with a full search.
+* `terminal_wait_for_change` waits on the same event instead of a 20 ms poll.
+* The background readers were already idle-cheap (a 0.1 s `select` for telnet, a 0.1 s
+  blocking read for serial; the 20 ms `to_thread` poll belonged to 0.7.0) and are unchanged:
+  measured 0.00-0.03% of a core idle.
+
+### Measurements (30 s window, process CPU from /proc, host load average 1.5-3.2)
+
+| Session, earlier output pending | 0.9.1 | 0.9.2 |
+| :--- | :--- | :--- |
+| telnet, none | 0.27% (0.080 s) | 0.00% (0.000 s) |
+| telnet, 300 KB | 20.33% (6.100 s) | 0.00% (0.000 s) |
+| serial (pty), none | 0.20% (0.060 s) | 0.03% (0.010 s) |
+| serial (pty), 300 KB | 20.20% (6.060 s) | 0.03% (0.010 s) |
+
+`tests/test_idle_cpu.py` (acceptance: under 1% of a core, `IDLE_WINDOW` seconds, default
+30), `tests/idle_cpu_harness.py` (run it on any package root to compare versions) and
+`tests/idle_cpu_child.py`.
+
+### Changes accepted from the launching session
+
+* 17-NOV-2026 (vms-exploration-orch, at the operator's request: "have the telnet tool
+  worker do the fix, and test that it uses almost no CPU when there is no I/O going on"):
+  this whole version.
+
 ## 0.9.1
 
 Opt-in input log, requested by vms-savage for SAVAGE playtest timing. **Nothing
