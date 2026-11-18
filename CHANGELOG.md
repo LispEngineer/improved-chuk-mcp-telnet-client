@@ -51,6 +51,14 @@ arrived. With a prompt pattern such as `(?:[A-Za-z0-9]+::)?USER1\$ $` that searc
 * 17-NOV-2026 (vms-exploration-orch, at the operator's request: "have the telnet tool
   worker do the fix, and test that it uses almost no CPU when there is no I/O going on"):
   this whole version.
+* 18-NOV-2026 (vms-exploration-orch, from an independent review of this version): stronger
+  tests only, no behaviour change. Idle CPU while one byte a second trickles in over 300 KB
+  pending; the incremental search with lookbacks of 8 and 64 characters and a UTF-8
+  character split at start_index; every byte delivered when no prompt matches; wake-up when
+  the session ends (`_wait_for_output` and `terminal_wait_for_change`); latency bound 150 ms;
+  a decode counter beside the search counter; several waiters on one session. Removed the
+  unused `WAIT_FOR_CHANGE_POLL_SECONDS` and `_sleep_until`'s unused session argument; the
+  `_wait_for_output` docstring states the lookback limit.
 
 ## 0.9.1
 

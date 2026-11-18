@@ -48,8 +48,9 @@ def _sample(proc, window):
     return {"cpu_seconds": cpu, "wall_seconds": t1 - t0, "percent_of_core": 100.0 * cpu / (t1 - t0)}
 
 
-def run_case(kind, prelude, window=30.0, pkg_root=None, settle=2.0):
-    """Returns {"cpu_seconds", "wall_seconds", "percent_of_core", "load1", "module"}."""
+def run_case(kind, prelude, window=30.0, pkg_root=None, settle=2.0, trickle=None):
+    """`trickle`: seconds between single bytes the peer sends from the start of the settle
+    until the end of the window (output that never makes a prompt). Returns {"cpu_seconds", "wall_seconds", "percent_of_core", "load1", "module"}."""
     env = dict(os.environ)
     if pkg_root:
         env["PYTHONPATH"] = pkg_root + os.pathsep + env.get("PYTHONPATH", "")
@@ -68,6 +69,7 @@ def run_case(kind, prelude, window=30.0, pkg_root=None, settle=2.0):
         tty.setraw(slave)
         target = os.ttyname(slave)
         keep += [master, slave]
+    stop = threading.Event()
     proc = subprocess.Popen(
         [sys.executable, CHILD, kind, target, log_dir, str(window + settle + 20)],
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, env=env, cwd=log_dir)
@@ -93,6 +95,18 @@ def run_case(kind, prelude, window=30.0, pkg_root=None, settle=2.0):
         assert proc.stdout.readline().strip() == "OPEN"
         threading.Thread(target=send_prelude, daemon=True).start()
         assert proc.stdout.readline().strip() == "WAITING"
+        def send_trickle():
+            while not stop.wait(trickle):
+                try:
+                    if kind == "telnet":
+                        conn.sendall(b".")
+                    else:
+                        os.write(master, b".")
+                except OSError:
+                    return
+
+        if trickle:
+            threading.Thread(target=send_trickle, daemon=True).start()
         time.sleep(settle)  # the first look at the prelude is a one-off cost, not idle cost
         result = _sample(proc, window)
         result["load1"] = os.getloadavg()[0]
@@ -101,6 +115,7 @@ def run_case(kind, prelude, window=30.0, pkg_root=None, settle=2.0):
             env=env, capture_output=True, text=True, cwd=log_dir).stdout.strip()
         return result
     finally:
+        stop.set()
         proc.kill()
         proc.wait()
         for obj in keep:

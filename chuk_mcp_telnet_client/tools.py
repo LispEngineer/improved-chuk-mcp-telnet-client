@@ -90,9 +90,8 @@ class TerminalDefaults:
     READER_COALESCE_SECONDS: float = 0.02
     READER_JOIN_SECONDS: float = 2.0
     # terminal_wait_for_change: the longest a single call may wait, so a call cannot hang
-    # a client for ever, and how often it looks at the (always current) session state.
+    # a client for ever.
     WAIT_FOR_CHANGE_MAX_TIMEOUT: float = 300.0
-    WAIT_FOR_CHANGE_POLL_SECONDS: float = 0.02
     # v0.9.2: waits sleep on an event the reader sets when bytes arrive, so an idle wait
     # costs no CPU. A wait still wakes at least this often as a safety net (it then does
     # nothing unless something changed).
@@ -1025,7 +1024,7 @@ def _utf8_incomplete_tail(data: bytes) -> bool:
     return False
 
 
-async def _sleep_until(session, event: asyncio.Event, timeout: float) -> None:
+async def _sleep_until(event: asyncio.Event, timeout: float) -> None:
     """Wait for the reader's wake-up, at most `timeout` seconds (and the heartbeat)."""
     timeout = min(max(timeout, 0.0), TerminalDefaults.WAIT_HEARTBEAT_SECONDS)
     try:
@@ -1052,6 +1051,10 @@ async def _wait_for_output(
     look; and a search resumes PROMPT_LOOKBACK_CHARS before where the last one ended
     (never before start_index) instead of rescanning everything pending. What matches,
     what is delivered, idle_timeout and the deadline are as before.
+
+    Limit: because a search resumes only PROMPT_LOOKBACK_CHARS (4096) characters back, a
+    match longer than that, or one that needs context from further back, can be missed
+    when it straddles chunks that were searched separately.
     """
     compiled = re.compile(prompt_pattern) if prompt_pattern else None
     deadline = time.monotonic() + max(0.0, max_wait_seconds)
@@ -1103,7 +1106,7 @@ async def _wait_for_output(
                     wake_in = min(wake_in, idle_timeout - idle_for)
                 if now >= deadline:
                     return _take_pending(session), False, None
-            await _sleep_until(session, event, wake_in)
+            await _sleep_until(event, wake_in)
     finally:
         session.wakeups.remove(event)
 
@@ -2216,7 +2219,7 @@ async def terminal_wait_for_change(
             wake_in = deadline - now
             if done:
                 wake_in = min(wake_in, settle - quiet_for)  # until the screen has been quiet long enough
-            await _sleep_until(session, event, wake_in)
+            await _sleep_until(event, wake_in)
     finally:
         session.wakeups.remove(event)
 
